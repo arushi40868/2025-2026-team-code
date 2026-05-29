@@ -48,7 +48,7 @@ echo "Output directory: ${BAM_DIR}"
 ## Run HISAT2 alignment ##
 hisat2 \
     -p ${SLURM_CPUS_PER_TASK} \
-    -x ${INDEX_DIR}/genome \
+    -x ${INDEX_DIR}/C.virginica_index \
     -1 ${R1} \
     -2 ${R2} \
     -S ${SAM_OUT}
