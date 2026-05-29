@@ -18,7 +18,7 @@ module load SAMtools
 
 ## Set Paths ##
 TRIMMED_DIR=/work/clh162/Data+/Arushi/2025-2026-team-code/Data+_team/Arushi/trimmedreads
-INDEX_DIR=/work/clh162/OysterRNA24/hisat2_index
+INDEX_DIR=/work/clh162/Data+/Arushi/2025-2026-team-code/Data+_team/Arushi/hisat2_index
 BAM_DIR=/work/clh162/Data+/Arushi/2025-2026-team-code/Data+_team/Arushi/aligned_bam
 
 mkdir -p ${BAM_DIR}
