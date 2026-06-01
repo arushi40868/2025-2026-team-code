@@ -9,10 +9,11 @@
 #SBATCH --mem=16G
 #SBATCH --mail-type=FAIL
 #SBATCH --mail-user=arushi.singh@duke.edu
+#SBATCH --account=wonglab
 
 # Activate conda
-source /hpc/home/clh162/miniconda3/etc/profile.d/conda.sh
-conda activate RNA-seq
+source /hpc/home/as1685/miniconda3/etc/profile.d/conda.sh
+conda activate multiqc_env
 
 ## Set paths ##
 FASTQC_OUT=/work/clh162/Data+/Arushi/2025-2026-team-code/Data+_team/Arushi/fastqc_raw
@@ -21,7 +22,7 @@ MULTIQC_OUT=/work/clh162/Data+/Arushi/2025-2026-team-code/Data+_team/Arushi/mult
 mkdir -p $MULTIQC_OUT
 
 ## Run MultiQC ##
-multiqc $FASTQC_OUT -o $MULTIQC_OUT
+python -m multiqc $FASTQC_OUT -o $MULTIQC_OUT
 
 echo "MultiQC complete!"
 
