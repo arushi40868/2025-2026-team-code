@@ -10,10 +10,11 @@
 #SBATCH --mem=32G
 #SBATCH --mail-type=FAIL
 #SBATCH --mail-user=arushi.singh@duke.edu
+#SBATCH --account=wonglab
 
 ## activate RNA-seq environment with updated version of Trim Galore ##
-source /hpc/home/clh162/miniconda3/etc/profile.d/conda.sh
-conda activate RNA-seq
+source /hpc/home/as1685/miniconda3/etc/profile.d/conda.sh
+conda activate multiqc_env
 
 # ensure correct version is functioning
 trim_galore -V
