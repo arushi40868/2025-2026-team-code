@@ -12,8 +12,8 @@
 #SBATCH --mail-user=arushi.singh@duke.edu
 
 # Activate conda environment containing RNA-seq package
-source /hpc/home/clh162/miniconda3/etc/profile.d/conda.sh
-conda activate RNA-seq
+source /hpc/home/as1685/miniconda3/etc/profile.d/conda.sh
+conda activate multiqc_env
 
 ## Set paths ##
 FASTQC_OUT=/work/clh162/Data+/Arushi/2025-2026-team-code/Data+_team/Arushi/fastqc_trimmed
@@ -27,7 +27,7 @@ echo "Running MultiQC on trimmed FastQC results..."
 echo "Input directory: $FASTQC_OUT"
 echo "Output directory: $MULTIQC_OUT"
 
-multiqc $FASTQC_OUT -o $MULTIQC_OUT
+python -m multiqc $FASTQC_OUT -o $MULTIQC_OUT
 
 echo "Trimmed MultiQC complete!"
 
