@@ -1,7 +1,7 @@
 #!/bin/bash -e
 #SBATCH --job-name=trim_fastqc_array
 #SBATCH --time=7-00:00:00
-#SBATCH --array=1-36
+#SBATCH --array=1-18%4
 #SBATCH --account=wonglab
 #SBATCH --output=/work/clh162/Data+/Arushi/2025-2026-team-code/Data+_team/Arushi/logs/trim_fastqc_%a.out
 #SBATCH --error=/work/clh162/Data+/Arushi/2025-2026-team-code/Data+_team/Arushi/logs/trim_fastqc_%a.err

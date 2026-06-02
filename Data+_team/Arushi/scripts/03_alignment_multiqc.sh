@@ -12,8 +12,8 @@
 #SBATCH --mail-user=arushi.singh@duke.edu
 
 # Activate conda environment containing MultiQC
-source /hpc/home/clh162/miniconda3/etc/profile.d/conda.sh
-conda activate RNA-seq
+source /hpc/home/as1685/miniconda3/etc/profile.d/conda.sh
+conda activate multiqc_env
 
 ## Set paths ##
 LOG_DIR=/work/clh162/Data+/Arushi/2025-2026-team-code/Data+_team/Arushi/logs
@@ -29,7 +29,7 @@ echo "Log directory: $LOG_DIR"
 echo "BAM directory: $BAM_DIR"
 echo "Output directory: $MULTIQC_OUT"
 
-multiqc $LOG_DIR $BAM_DIR -o $MULTIQC_OUT
+python -m multiqc $LOG_DIR $BAM_DIR -o $MULTIQC_OUT
 
 echo "Alignment MultiQC complete!"
 

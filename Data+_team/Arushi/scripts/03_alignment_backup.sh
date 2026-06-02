@@ -1,7 +1,7 @@
 #!/bin/bash -e
 #SBATCH --job-name=alignment_array
 #SBATCH --time=7-00:00:00
-#SBATCH --array=1-18%2
+#SBATCH --array=1-36
 #SBATCH --account=wonglab
 #SBATCH --output=/work/clh162/Data+/Arushi/2025-2026-team-code/Data+_team/Arushi/logs/hisat2_alignment_%A_%a.out
 #SBATCH --error=/work/clh162/Data+/Arushi/2025-2026-team-code/Data+_team/Arushi/logs/hisat2_alignment_%A_%a.err
@@ -14,11 +14,11 @@
 
 ## Load modules ##
 module load HISAT2
-module load samtools
+module load SAMtools
 
 ## Set Paths ##
 TRIMMED_DIR=/work/clh162/Data+/Arushi/2025-2026-team-code/Data+_team/Arushi/trimmedreads
-INDEX_DIR=/work/clh162/OysterRNA24/hisat2_align/Cv_genome_RU_2025_shared/hisat2_index
+INDEX_DIR=/work/clh162/OysterRNA24/hisat2_index
 BAM_DIR=/work/clh162/Data+/Arushi/2025-2026-team-code/Data+_team/Arushi/aligned_bam
 
 mkdir -p ${BAM_DIR}
@@ -46,8 +46,14 @@ echo "Index directory: ${INDEX_DIR}"
 echo "Output directory: ${BAM_DIR}"
 
 ## Run HISAT2 alignment ##
-hisat2 -p ${SLURM_CPUS_PER_TASK} -x ${INDEX_DIR}/c.virginica_HFM_index -1 ${R1} -2 ${R2} -S ${SAM_OUT}
+hisat2 \
+    -p ${SLURM_CPUS_PER_TASK} \
+    -x ${INDEX_DIR}/genome \
+    -1 ${R1} \
+    -2 ${R2} \
+    -S ${SAM_OUT}
 
+## Convert SAM to BAM ##
 samtools view -@ ${SLURM_CPUS_PER_TASK} -bS ${SAM_OUT} > ${BAM_OUT}
 
 ## Sort BAM ##
