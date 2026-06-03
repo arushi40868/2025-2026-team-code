@@ -399,21 +399,25 @@ library(ggplot2)
 
 ```{r}
 
-se_tidy <- se |>
-  tidySummarizedExperiment::tidy()
+library(tidySummarizedExperiment)
+library(dplyr)
+library(ggplot2)
+
+se_tidy <- as_tibble(se)
 
 library_sizes <- se_tidy |>
-  group_by(sample_id, group, site, date) |>
+  group_by(sample_id, location, oyster_id, month, collection_date) |>
   summarise(total_counts = sum(counts), .groups = "drop")
 
-ggplot(library_sizes, aes(x = sample_id, y = total_counts, fill = group)) +
+ggplot(library_sizes, aes(x = sample_id, y = total_counts, fill = location)) +
   geom_col() +
   theme_bw() +
   coord_flip() +
   labs(
     title = "Library sizes by sample",
     x = "Sample",
-    y = "Total assigned gene counts"
+    y = "Total assigned gene counts",
+    fill = "Location"
   )
 ```
 
@@ -425,30 +429,34 @@ library(tidySummarizedExperiment)
 library(dplyr)
 library(ggplot2)
 
+se_tidy <- as_tibble(se)
+
 top_genes <- se_tidy |>
   group_by(gene_id) |>
-  summarise(mean_count = mean(counts), .groups = "drop") |>
+  summarise(
+    mean_count = mean(counts),
+    .groups = "drop"
+  ) |>
   arrange(desc(mean_count)) |>
-  slice_head(n = 10)
+  slice_head(n = 5)
 
-group_gene_summary <- se_tidy |>
-  filter(gene_id %in% top_genes$gene_id) |>
-  group_by(gene_id, group) |>
-  summarise(mean_count = mean(counts), .groups = "drop")
+top_gene_sample_data <- se_tidy |>
+  filter(gene_id %in% top_genes$gene_id)
 
 ggplot(
-  group_gene_summary,
-  aes(x = gene_id, y = mean_count + 1, fill = group)
+  top_gene_sample_data,
+  aes(x = sample_id, y = counts + 1, color = location)
 ) +
-  geom_col(position = "dodge") +
+  geom_point(size = 2, alpha = 0.8) +
   scale_y_log10() +
+  facet_wrap(~ gene_id, scales = "free_y") +
   coord_flip() +
   theme_bw() +
   labs(
-    title = "Mean counts for top expressed genes by group",
-    x = "Gene",
-    y = "Mean gene counts + 1, log10 scale",
-    fill = "Group"
+    title = "Top expressed genes across samples",
+    x = "Sample",
+    y = "Gene counts + 1, log10 scale",
+    color = "Location"
   )
 ```
 
