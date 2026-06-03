@@ -266,33 +266,48 @@ head(count_matrix[, 1:5])
 
 sample_names <- colnames(count_matrix)
 
-# Split sample names like:
-# CMT_SJ1_19Aug24_Gill_S203_L005
 sample_parts <- do.call(rbind, strsplit(sample_names, "_"))
 
 coldata_clean <- data.frame(
   sample_id = sample_names,
-  treatment = sample_parts[, 1],
-  site = sample_parts[, 2],
-  collection_date_raw = sample_parts[, 3],
-  tissue = sample_parts[, 4],
-  sample_code = sample_parts[, 5],
+  location = sample_parts[, 1],        # CMT or DAF
+  oyster_id = sample_parts[, 2],       # SJ1, SJ2, SJ3
+  timepoint_raw = sample_parts[, 3],   # 19Aug24, 20Jun24, etc.
+  tissue = sample_parts[, 4],          # Gill
+  sequencing_sample = sample_parts[, 5],
   lane = sample_parts[, 6],
   stringsAsFactors = FALSE
 )
 
-# Convert date if possible
+# Convert dates
 coldata_clean$collection_date <- as.Date(
-  coldata_clean$collection_date_raw,
+  coldata_clean$timepoint_raw,
   format = "%d%b%y"
 )
 
-# Make rownames match the count matrix columns
+# Make a cleaner month/timepoint variable
+coldata_clean$month <- format(coldata_clean$collection_date, "%b")
+
+# Optional: order the months chronologically
+coldata_clean$month <- factor(
+  coldata_clean$month,
+  levels = c("Jun", "Jul", "Aug")
+)
+
+# Treat categorical variables as factors
+coldata_clean$location <- factor(coldata_clean$location)
+coldata_clean$oyster_id <- factor(coldata_clean$oyster_id)
+coldata_clean$tissue <- factor(coldata_clean$tissue)
+
+# Make rownames match count matrix columns
 rownames(coldata_clean) <- coldata_clean$sample_id
 
-# Check
+# Final checks
 dim(coldata_clean)
 head(coldata_clean)
+table(coldata_clean$location)
+table(coldata_clean$oyster_id)
+table(coldata_clean$month)
 all(rownames(coldata_clean) == colnames(count_matrix))
 ```
 
@@ -352,8 +367,8 @@ stopifnot(all(rownames(coldata_from_counts) == colnames(count_matrix)))
 
 se <- SummarizedExperiment(
   assays = list(counts = count_matrix),
-  rowData = rowranges,
-  colData = coldata_from_counts
+  colData = coldata,
+  rowData = rowranges
 )
 
 se
@@ -435,4 +450,20 @@ ggplot(
     y = "Mean gene counts + 1, log10 scale",
     fill = "Group"
   )
+```
+
+```{r}
+library(readxl)
+
+metadata_file <- "../xRNA for BC Summer 2024.xlsx"
+
+excel_sheets(metadata_file)
+```
+
+```{r}
+meta <- read_excel(metadata_file, sheet = 1)
+
+dim(meta)
+names(meta)
+View(meta)
 ```
