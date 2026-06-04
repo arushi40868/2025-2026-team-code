@@ -1,18 +1,18 @@
 #!/bin/bash -e
 #SBATCH --job-name=fastqc_data
-#SBATCH --array=0-35            # there are 36 samples, index starting at 0
+#SBATCH --array=0-17            
 #SBATCH --time=7-00:00:00
 #SBATCH --output=/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/fastqc_%A_%a.out
 #SBATCH --error=/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/fastqc_%A_%a.err
 #SBATCH --partition=common
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=16g
+#SBATCH --mem=16G
 #SBATCH --mail-type=ALL
 #SBATCH --mail-user=sophie.chi@duke.edu
 
 # load fastqc
-module load fastqc
+module load FastQC
 
 # set paths
 RAW_DIR=/work/clh162/OysterRNA24/rawreads

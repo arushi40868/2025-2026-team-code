@@ -25,3 +25,6 @@ mkdir -p $MULTIQC_OUTPUT_DIR
 multiqc $FASTQC_OUTPUT_DIR -o $MULTIQC_OUTPUT_DIR
 
 echo "MultiQC complete"
+
+# deactivate conda environment
+conda deactivate

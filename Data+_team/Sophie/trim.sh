@@ -1,7 +1,7 @@
 #!/bin/bash -e
 #SBATCH --job-name=trimmed_reads
 #SBATCH --time=7-00:00:00
-#SBATCH --array=0-35
+#SBATCH --array=0-17
 #SBATCH --output=/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/trimmed_reads_%A_%a.out
 #SBATCH --error=/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/trimmed_reads_%A_%a.err
 #SBATCH --partition=common
@@ -39,6 +39,8 @@ trim_galore --paired $READ1 $READ2 --quality 30 --output_dir $TRIMMED_DIR
 
 echo "TrimGalore complete for sample: $SAMPLE"
 
+# deactivate conda environment
+conda deactivate
 
 
 
