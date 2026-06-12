@@ -3,6 +3,8 @@ title: "RNA Sequencing - Oyesters"
 output:
   html_document:
     df_print: paged
+  word_document: default
+  pdf_document: default
 ---
 
 Load the needed packages
@@ -59,64 +61,37 @@ head(trimmed_fastqc)
 Count Check Matrix
 
 ```{r}
-count_dir <- "/work/clh162/OysterRNA24/hisat2_align/featureCounts_counts"
+count_file <- "/work/clh162/Data+/Arushi/2025-2026-team-code/Data+_team/Arushi/featureCounts_counts/combined_featureCounts_gene_counts.txt"
 
-files <- list.files(
-  count_dir,
-  pattern = "_gene_counts\\.txt$",
-  full.names = TRUE
+fc <- read.delim(
+  count_file,
+  comment.char = "#",
+  check.names = FALSE
 )
 
-length(files)
-basename(files)[1:5]
-
-test <- read.delim(files[1], comment.char = "#", check.names = FALSE)
-
-dim(test)
-names(test)
-head(test)
+dim(fc)
+names(fc)
+head(fc)
 ```
 
 ```{r}
-count_dir <- "/work/clh162/OysterRNA24/hisat2_align/featureCounts_counts"
+# The first 6 columns are annotation columns from featureCounts
+# Count columns start at column 7
+counts <- fc[, 7:ncol(fc)]
 
-files <- list.files(
-  count_dir,
-  pattern = "_gene_counts\\.txt$",
-  full.names = TRUE
-)
+# Clean sample names from BAM paths
+sample_names <- basename(colnames(counts))
+sample_names <- sub("_sorted\\.bam$", "", sample_names)
 
-read_featurecounts <- function(file) {
-  df <- read.delim(
-    file,
-    comment.char = "#",
-    check.names = FALSE
-  )
-  
-  sample_name <- basename(file)
-  sample_name <- sub("_gene_counts\\.txt$", "", sample_name)
-  
-  gene_col <- 1
-  count_col <- ncol(df)
-  
-  counts <- df[, c(gene_col, count_col)]
-  names(counts) <- c("Geneid", sample_name)
-  
-  return(counts)
-}
+colnames(counts) <- sample_names
+rownames(counts) <- fc$Geneid
 
-count_list <- lapply(files, read_featurecounts)
+count_matrix <- as.matrix(counts)
+storage.mode(count_matrix) <- "integer"
 
-counts_df <- Reduce(
-  function(x, y) merge(x, y, by = "Geneid", all = TRUE),
-  count_list
-)
-
-rownames(counts_df) <- counts_df$Geneid
-counts <- counts_df[, -1]
-
-dim(counts)
-head(counts[, 1:5])
+dim(count_matrix)
+head(count_matrix[, 1:5])
+summary(colSums(count_matrix))
 ```
 
 ```{r}
@@ -262,58 +237,41 @@ head(count_matrix[, 1:5])
 
 ```{r}
 
-# Step 2: Clean sample annotations
-
 sample_names <- colnames(count_matrix)
 
 sample_parts <- do.call(rbind, strsplit(sample_names, "_"))
 
-coldata_clean <- data.frame(
+coldata <- data.frame(
   sample_id = sample_names,
-  location = sample_parts[, 1],        # CMT or DAF
-  oyster_id = sample_parts[, 2],       # SJ1, SJ2, SJ3
-  timepoint_raw = sample_parts[, 3],   # 19Aug24, 20Jun24, etc.
-  tissue = sample_parts[, 4],          # Gill
+  location = sample_parts[, 1],
+  oyster_id = sample_parts[, 2],
+  timepoint_raw = sample_parts[, 3],
+  tissue = sample_parts[, 4],
   sequencing_sample = sample_parts[, 5],
   lane = sample_parts[, 6],
   stringsAsFactors = FALSE
 )
 
-# Convert dates
-coldata_clean$collection_date <- as.Date(
-  coldata_clean$timepoint_raw,
+coldata$collection_date <- as.Date(
+  coldata$timepoint_raw,
   format = "%d%b%y"
 )
 
-# Make a cleaner month/timepoint variable
-coldata_clean$month <- format(coldata_clean$collection_date, "%b")
-
-# Optional: order the months chronologically
-coldata_clean$month <- factor(
-  coldata_clean$month,
+coldata$month <- factor(
+  format(coldata$collection_date, "%b"),
   levels = c("Jun", "Jul", "Aug")
 )
 
-# Treat categorical variables as factors
-coldata_clean$location <- factor(coldata_clean$location)
-coldata_clean$oyster_id <- factor(coldata_clean$oyster_id)
-coldata_clean$tissue <- factor(coldata_clean$tissue)
+coldata$location <- factor(coldata$location)
+coldata$oyster_id <- factor(coldata$oyster_id)
+coldata$tissue <- factor(coldata$tissue)
 
-# Make rownames match count matrix columns
-rownames(coldata_clean) <- coldata_clean$sample_id
+rownames(coldata) <- coldata$sample_id
 
-# Final checks
-dim(coldata_clean)
-head(coldata_clean)
-table(coldata_clean$location)
-table(coldata_clean$oyster_id)
-table(coldata_clean$month)
-all(rownames(coldata_clean) == colnames(count_matrix))
+all(rownames(coldata) == colnames(count_matrix))
 ```
 
 ```{r}
-coldata <- coldata_clean
-
 dim(count_matrix)
 dim(coldata)
 
@@ -321,29 +279,6 @@ colnames(count_matrix)
 rownames(coldata)
 
 all(rownames(coldata) == colnames(count_matrix))
-```
-
-3.  Create usable sample metadata from sample names
-
-```{r}
-
-sample_names <- colnames(count_matrix)
-
-coldata_from_counts <- data.frame(
-  sample_id = sample_names,
-  group = sub("_.*", "", sample_names),
-  site = sub("^[^_]+_([^_]+)_.*", "\\1", sample_names),
-  date = sub("^[^_]+_[^_]+_([^_]+)_.*", "\\1", sample_names),
-  tissue = sub("^[^_]+_[^_]+_[^_]+_([^_]+)_.*", "\\1", sample_names),
-  sample_code = sub(".*_(S[0-9]+)_.*", "\\1", sample_names),
-  lane = sub(".*_(L[0-9]+)$", "\\1", sample_names),
-  stringsAsFactors = FALSE
-)
-
-rownames(coldata_from_counts) <- coldata_from_counts$sample_id
-
-coldata_from_counts
-all(rownames(coldata_from_counts) == colnames(count_matrix))
 ```
 
 4.  Prep gene annotations
@@ -363,14 +298,13 @@ all(rownames(rowranges) == rownames(count_matrix))
 library(SummarizedExperiment)
 
 stopifnot(all(rownames(rowranges) == rownames(count_matrix)))
-stopifnot(all(rownames(coldata_from_counts) == colnames(count_matrix)))
+stopifnot(all(rownames(coldata) == colnames(count_matrix)))
 
 se <- SummarizedExperiment(
   assays = list(counts = count_matrix),
   colData = coldata,
   rowData = rowranges
 )
-
 se
 ```
 
@@ -474,4 +408,644 @@ meta <- read_excel(metadata_file, sheet = 1)
 dim(meta)
 names(meta)
 View(meta)
+```
+
+```{r}
+se <- readRDS("oyster_summarized_experiment.rds")
+se
+```
+
+```{r}
+assay(se)          # the count matrix / expression data
+colData(se)        # sample metadata
+rowData(se)        # gene/feature annotations
+metadata(se)       # extra metadata, if any
+```
+
+DESeq2
+
+1.  Load Packages
+
+```{r}
+
+suppressPackageStartupMessages({
+  library(DESeq2)
+  library(SummarizedExperiment)
+  library(dplyr)
+  library(ggplot2)
+})
+```
+
+```{r}
+dim(count_matrix)
+dim(coldata)
+
+head(coldata)
+
+all(rownames(coldata) == colnames(count_matrix))
+```
+
+2.  Make sure variables are factors
+
+```{r}
+coldata$location <- factor(coldata$location)
+coldata$month <- factor(coldata$month, levels = c("Jun", "Jul", "Aug"))
+coldata$oyster_id <- factor(coldata$oyster_id)
+```
+
+```{r}
+coldata$location <- relevel(coldata$location, ref = "CMT")
+```
+
+3.  Create the DESeq2 object and filter low count genes
+
+```{r}
+dds <- DESeqDataSetFromMatrix(
+  countData = count_matrix,
+  colData = coldata,
+  design = ~ month + location
+)
+
+keep <- rowSums(counts(dds) >= 10) >= 3
+dds <- dds[keep, ]
+
+dds <- DESeq(dds)
+
+plotDispEsts(dds, main = "Dispersion estimates using Arushi featureCounts")
+```
+
+5.  Run DESeq2
+
+```{r}
+dds <- DESeq(dds)
+```
+
+```{r}
+resultsNames(dds)
+```
+
+6.  Extract location results
+
+```{r}
+
+res_location <- results(dds, name = "location_DAF_vs_CMT")
+
+summary(res_location)
+```
+
+```{r}
+res_location_ordered <- res_location[order(res_location$padj), ]
+
+head(res_location_ordered)
+```
+
+```{r}
+res_location_df <- as.data.frame(res_location_ordered)
+
+res_location_df$gene_id <- rownames(res_location_df)
+
+head(res_location_df)
+```
+
+7.  Add gene annotations
+
+```{r}
+rowranges_df <- as.data.frame(rowranges)
+rowranges_df$gene_id <- rownames(rowranges_df)
+
+res_annotated <- left_join(
+  res_location_df,
+  rowranges_df,
+  by = "gene_id"
+)
+
+head(res_annotated)
+```
+
+```{r}
+write.csv(
+  res_annotated,
+  "DESeq2_location_DAF_vs_CMT_results.csv",
+  row.names = FALSE,
+  quote = FALSE
+)
+```
+
+8.  Count significant genes
+
+```{r}
+sig_location_lfc <- res_annotated |>
+  filter(!is.na(padj), padj < 0.05, abs(log2FoldChange) >= 1)
+
+nrow(sig_location_lfc)
+```
+
+padj \< 0.05 = statistically significant after multiple testing correction abs(log2FoldChange) \>= 1 = at least 2-fold difference between locations
+
+9.  MA Plot
+
+```{r}
+plotMA(res_location, ylim = c(-5, 5))
+```
+
+x-axis = average expression\
+y-axis = log2 fold change between DAF and CMT
+
+Most genes cluster around `log2 fold change = 0`, which means most genes are not strongly different between DAF and CMT. Genes with higher average expression tend to have more stable fold changes.
+
+10. Volcano plot
+
+```{r}
+volcano_df <- res_annotated |>
+  mutate(
+    significant = ifelse(!is.na(padj) & padj < 0.05 & abs(log2FoldChange) >= 1,
+                         "Significant", "Not significant")
+  )
+
+ggplot(volcano_df, aes(x = log2FoldChange, y = -log10(padj), color = significant)) +
+  geom_point(alpha = 0.6, size = 1.5) +
+  theme_bw() +
+  labs(
+    title = "DESeq2 results: DAF vs CMT",
+    x = "log2 fold change",
+    y = "-log10 adjusted p-value",
+    color = "Result"
+  )
+
+
+```
+
+x-axis = log2 fold change
+
+y-axis = -log10 adjusted p-value
+
+Genes higher up are more statistically significant. Genes farther left/right have stronger fold changes.
+
+Dispersion Plot
+
+```{r}
+# Plot dispersion estimates
+
+plotDispEsts(dds, main = "Dispersion estimates for oyster RNA-seq DESeq2 model")
+```
+
+11. Variance stabilizing transformation for PCA
+
+```{r}
+vsd <- vst(dds, blind = FALSE)
+
+vsd
+```
+
+```{r}
+vst_matrix <- assay(vsd)
+
+dim(vst_matrix)
+```
+
+12. PCA using DESeq2 built in plot
+
+```{r}
+plotPCA(vsd, intgroup = c("location", "month"))
+
+```
+
+13. The biggest visible pattern is that **many DAF samples cluster more toward the right side**, while **several CMT samples are more spread out and include left-side outliers**.
+
+    That suggests location may be contributing to gene expression differences. This supports the idea that environmental/location-related factors could affect oyster gene expression.
+
+    PC1 explains \~19% of variance
+
+    PC2 explains \~10% of variance
+
+14. Custom PCA plot
+
+There is not a perfectly clean separation by month. Some June, July, and August samples overlap. That means month/timepoint matters somewhat, but from this view, it does not look like month alone explains everything.
+
+```{r}
+pca_data <- plotPCA(
+  vsd,
+  intgroup = c("location", "month", "oyster_id"),
+  returnData = TRUE
+)
+
+percent_var <- round(100 * attr(pca_data, "percentVar"))
+
+ggplot(pca_data, aes(x = PC1, y = PC2, color = location, shape = month)) +
+  geom_point(size = 4, alpha = 0.9) +
+  theme_bw() +
+  labs(
+    title = "PCA of variance-stabilized gene expression",
+    x = paste0("PC1: ", percent_var[1], "% variance"),
+    y = paste0("PC2: ", percent_var[2], "% variance"),
+    color = "Location",
+    shape = "Month"
+  )
+```
+
+14. PCA with oyster ID labels
+
+```{r}
+ggplot(pca_data, aes(x = PC1, y = PC2, color = location, shape = month, label = oyster_id)) +
+  geom_point(size = 4, alpha = 0.9) +
+  geom_text(vjust = -1, size = 3) +
+  theme_bw() +
+  labs(
+    title = "PCA of gene expression with oyster replicate labels",
+    x = paste0("PC1: ", percent_var[1], "% variance"),
+    y = paste0("PC2: ", percent_var[2], "% variance"),
+    color = "Location",
+    shape = "Month"
+  )
+```
+
+15. PCA with top variable genes manually
+
+```{r}
+
+# Step 16: PCA on top variable genes manually
+
+# Calculate variance for each gene
+gene_variances <- apply(vst_matrix, 1, var)
+
+# Pick top 500 most variable genes
+top_variable_genes <- names(sort(gene_variances, decreasing = TRUE))[1:500]
+
+# Run PCA on samples
+pca <- prcomp(t(vst_matrix[top_variable_genes, ]), scale. = FALSE)
+
+# Make PCA dataframe
+pca_df <- as.data.frame(pca$x)
+pca_df$sample_id <- rownames(pca_df)
+
+# Add metadata WITHOUT duplicating sample_id
+metadata_for_pca <- as.data.frame(coldata)
+metadata_for_pca$sample_id <- rownames(metadata_for_pca)
+
+pca_df <- merge(
+  pca_df,
+  metadata_for_pca,
+  by = "sample_id"
+)
+
+# Check for duplicate column names
+anyDuplicated(names(pca_df))
+names(pca_df)
+
+# Percent variance explained
+percent_var_manual <- round(100 * (pca$sdev^2 / sum(pca$sdev^2)))
+
+# Plot
+ggplot(pca_df, aes(x = PC1, y = PC2, color = location, shape = month)) +
+  geom_point(size = 4, alpha = 0.9) +
+  theme_bw() +
+  labs(
+    title = "PCA using top 500 variable genes",
+    x = paste0("PC1: ", percent_var_manual[1], "% variance"),
+    y = paste0("PC2: ", percent_var_manual[2], "% variance"),
+    color = "Location",
+    shape = "Month"
+  )
+```
+
+16. Save plots
+
+```{r}
+
+saveRDS(dds, "oyster_deseq2_dds.rds")
+saveRDS(vsd, "oyster_deseq2_vst.rds")
+saveRDS(res_annotated, "DESeq2_location_DAF_vs_CMT_results.rds")
+```
+
+Heatmap
+
+```{r}
+if (!requireNamespace("pheatmap", quietly = TRUE)) {
+  install.packages("pheatmap")
+}
+
+library(pheatmap)
+library(dplyr)
+
+```
+
+```{r}
+class(dds)
+class(vsd)
+head(res_annotated)
+
+vst_matrix <- assay(vsd)
+
+dim(vst_matrix)
+```
+
+1.  Choose deferentially expresses genes for the heatmap
+
+```{r}
+
+sig_genes <- res_annotated |>
+  filter(
+    !is.na(padj),
+    padj < 0.05,
+    abs(log2FoldChange) >= 1
+  ) |>
+  arrange(padj)
+
+nrow(sig_genes)
+head(sig_genes)
+
+sig_genes_strict <- res_annotated |>
+  filter(
+    !is.na(padj),
+    padj < 0.01,
+    abs(log2FoldChange) >= 2
+  ) |>
+  arrange(padj)
+
+nrow(sig_genes_strict)
+
+top_heatmap_genes <- sig_genes_strict |>
+  slice_head(n = 50) |>
+  pull(gene_id)
+
+heatmap_matrix <- vst_matrix[top_heatmap_genes, ]
+```
+
+```{r}
+top_heatmap_genes <- sig_genes |>
+  slice_head(n = 50) |>
+  pull(gene_id)
+
+length(top_heatmap_genes)
+head(top_heatmap_genes)
+```
+
+2.  Pull expression values for those genes
+
+```{r}
+heatmap_matrix <- vst_matrix[top_heatmap_genes, ]
+
+dim(heatmap_matrix)
+heatmap_matrix[1:5, 1:5]
+```
+
+3.  Add sample annotations to the heatmap
+
+```{r}
+annotation_col <- as.data.frame(coldata[, c("location", "month", "oyster_id")])
+
+rownames(annotation_col) <- rownames(coldata)
+
+annotation_col
+```
+
+```{r}
+#Quick check
+all(rownames(annotation_col) == colnames(heatmap_matrix))
+```
+
+4.  Make heatmap
+
+```{r}
+pheatmap(
+  heatmap_matrix,
+  scale = "row",
+  annotation_col = annotation_col,
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  clustering_distance_rows = "euclidean",
+  clustering_distance_cols = "euclidean",
+  clustering_method = "complete",
+  fontsize_row = 6,
+  fontsize_col = 7,
+  main = "Top differentially expressed genes: DAF vs CMT"
+)
+```
+
+```{r}
+pheatmap(
+  heatmap_matrix,
+  scale = "row",
+  annotation_col = annotation_col,
+  show_rownames = FALSE,
+  show_colnames = TRUE,
+  clustering_distance_rows = "euclidean",
+  clustering_distance_cols = "euclidean",
+  clustering_method = "complete",
+  main = "Top differentially expressed genes: DAF vs CMT"
+)
+```
+
+red/orange = higher-than-average expression for that gene
+
+pale/white = around average
+
+blue/teal = lower-than-average expression
+
+The heatmap shows variance-stabilized expression values for the top differentially expressed genes between DAF and CMT, scaled by gene. Each row represents a gene and each column represents a sample. The column annotations show location, month, and oyster replicate. While some genes show higher relative expression in subsets of DAF or CMT samples, the samples do not cluster perfectly by location. Instead, the clustering suggests that location-associated expression differences exist, but month and biological replicate also contribute to variation in gene expression. This supports the idea that environmental context may influence gene expression, while also highlighting the importance of accounting for timepoint and biological replicate effects in downstream analysis.
+
+Save
+
+```{r}
+pheatmap(
+  heatmap_matrix,
+  scale = "row",
+  annotation_col = annotation_col,
+  show_rownames = FALSE,
+  show_colnames = TRUE,
+  clustering_distance_rows = "euclidean",
+  clustering_distance_cols = "euclidean",
+  clustering_method = "complete",
+  main = "Top differentially expressed genes: DAF vs CMT",
+  filename = "DESeq2_DAF_vs_CMT_heatmap.png",
+  width = 10,
+  height = 8
+)
+
+list.files(pattern = "heatmap")
+```
+
+Check
+
+```{r}
+# Metadata alignment
+all(rownames(coldata) == colnames(count_matrix))
+coldata
+
+# Experimental design balance
+table(coldata$location)
+table(coldata$month)
+table(coldata$oyster_id)
+table(coldata$location, coldata$month)
+table(coldata$location, coldata$oyster_id)
+
+# Count matrix checks
+dim(count_matrix)
+anyDuplicated(rownames(count_matrix))
+anyDuplicated(colnames(count_matrix))
+all(count_matrix == round(count_matrix))
+summary(colSums(count_matrix))
+
+# Low-count gene check
+summary(rowSums(count_matrix))
+sum(rowSums(count_matrix) >= 10)
+sum(rowSums(count_matrix >= 10) >= 3)
+```
+
+```{r}
+dds <- DESeqDataSetFromMatrix(
+  countData = count_matrix,
+  colData = coldata,
+  design = ~ month + location
+)
+
+keep <- rowSums(counts(dds) >= 10) >= 3
+dds <- dds[keep, ]
+
+dds <- DESeq(dds)
+
+plotDispEsts(dds, main = "Dispersion estimates after low-count filtering")
+```
+
+```{r}
+rm(list = ls())
+```
+
+FIX
+
+```{r}
+library(DESeq2)
+library(SummarizedExperiment)
+library(dplyr)
+```
+
+```{r}
+count_file <- "/work/clh162/Data+/Arushi/2025-2026-team-code/Data+_team/Arushi/featureCounts_counts/combined_featureCounts_gene_counts.txt"
+
+file.exists(count_file)
+
+fc <- read.delim(
+  count_file,
+  comment.char = "#",
+  check.names = FALSE
+)
+
+dim(fc)
+names(fc)
+head(fc)
+```
+
+```{r}
+counts <- fc[, 7:ncol(fc)]
+
+sample_names <- basename(colnames(counts))
+sample_names <- sub("_sorted\\.bam$", "", sample_names)
+
+colnames(counts) <- sample_names
+rownames(counts) <- fc$Geneid
+
+count_matrix <- as.matrix(counts)
+storage.mode(count_matrix) <- "integer"
+
+dim(count_matrix)
+colnames(count_matrix)
+summary(colSums(count_matrix))
+all(count_matrix == round(count_matrix))
+```
+
+```{r}
+sample_names <- colnames(count_matrix)
+
+sample_parts <- do.call(rbind, strsplit(sample_names, "_"))
+
+coldata <- data.frame(
+  sample_id = sample_names,
+  location = sample_parts[, 1],
+  oyster_id = sample_parts[, 2],
+  timepoint_raw = sample_parts[, 3],
+  tissue = sample_parts[, 4],
+  sequencing_sample = sample_parts[, 5],
+  lane = sample_parts[, 6],
+  stringsAsFactors = FALSE
+)
+
+coldata$collection_date <- as.Date(
+  coldata$timepoint_raw,
+  format = "%d%b%y"
+)
+
+coldata$month <- factor(
+  format(coldata$collection_date, "%b"),
+  levels = c("Jun", "Jul", "Aug")
+)
+
+coldata$location <- factor(coldata$location)
+coldata$location <- relevel(coldata$location, ref = "CMT")
+
+coldata$oyster_id <- factor(coldata$oyster_id)
+coldata$tissue <- factor(coldata$tissue)
+
+rownames(coldata) <- coldata$sample_id
+
+all(rownames(coldata) == colnames(count_matrix))
+table(coldata$location, coldata$month)
+table(coldata$location, coldata$oyster_id)
+```
+
+```{r}
+summary_file <- "/work/clh162/Data+/Arushi/2025-2026-team-code/Data+_team/Arushi/featureCounts_counts/combined_featureCounts_gene_counts.txt.summary"
+
+fc_summary <- read.delim(summary_file, check.names = FALSE)
+
+fc_summary
+```
+
+```{r}
+assigned <- fc_summary[fc_summary$Status == "Assigned", -1]
+total <- colSums(fc_summary[, -1])
+
+assigned_percent <- as.numeric(assigned) / total * 100
+
+assigned_check <- data.frame(
+  sample = names(assigned),
+  assigned_reads = as.numeric(assigned),
+  total_reads = as.numeric(total),
+  assigned_percent = assigned_percent
+)
+
+assigned_check
+summary(assigned_check$assigned_percent)
+```
+
+```{r}
+dds_location <- DESeqDataSetFromMatrix(
+  countData = count_matrix,
+  colData = coldata,
+  design = ~ location
+)
+
+dds_location <- dds_location[rowSums(counts(dds_location) >= 10) >= 3, ]
+dds_location <- DESeq(dds_location)
+
+plotDispEsts(dds_location, main = "Design: ~ location")
+```
+
+```{r}
+dds_interaction <- DESeqDataSetFromMatrix(
+  countData = count_matrix,
+  colData = coldata,
+  design = ~ month * location
+)
+
+keep <- rowSums(counts(dds_interaction) >= 10) >= 3
+dds_interaction <- dds_interaction[keep, ]
+
+dds_interaction <- DESeq(dds_interaction)
+
+plotDispEsts(
+  dds_interaction,
+  main = "Design: ~ month * location"
+)
+
+resultsNames(dds_interaction)
 ```
