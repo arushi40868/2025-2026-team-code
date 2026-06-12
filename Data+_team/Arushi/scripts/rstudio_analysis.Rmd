@@ -581,14 +581,6 @@ y-axis = -log10 adjusted p-value
 
 Genes higher up are more statistically significant. Genes farther left/right have stronger fold changes.
 
-Dispersion Plot
-
-```{r}
-# Plot dispersion estimates
-
-plotDispEsts(dds, main = "Dispersion estimates for oyster RNA-seq DESeq2 model")
-```
-
 11. Variance stabilizing transformation for PCA
 
 ```{r}
@@ -823,14 +815,35 @@ pheatmap(
 ```
 
 ```{r}
+# Make sure annotation rows match the heatmap columns
+annotation_col <- annotation_col[colnames(heatmap_matrix), ]
+
+# Set factor order so pheatmap sorts the way we want
+annotation_col$location <- factor(annotation_col$location, levels = c("CMT", "DAF"))
+annotation_col$month <- factor(annotation_col$month, levels = c("Jun", "Jul", "Aug"))
+annotation_col$oyster_id <- factor(annotation_col$oyster_id, levels = c("SJ1", "SJ2", "SJ3"))
+
+# Order samples by location, then month, then oyster
+sample_order <- rownames(annotation_col)[order(
+  annotation_col$month,
+  annotation_col$location,
+  annotation_col$oyster_id
+)]
+
+# Reorder matrix and annotation
+heatmap_matrix_ordered <- heatmap_matrix[, sample_order]
+annotation_col_ordered <- annotation_col[sample_order, ]
+
+# Plot cleaner heatmap
 pheatmap(
-  heatmap_matrix,
+  heatmap_matrix_ordered,
   scale = "row",
-  annotation_col = annotation_col,
+  annotation_col = annotation_col_ordered,
   show_rownames = FALSE,
   show_colnames = TRUE,
+  cluster_rows = TRUE,
+  cluster_cols = FALSE,
   clustering_distance_rows = "euclidean",
-  clustering_distance_cols = "euclidean",
   clustering_method = "complete",
   main = "Top differentially expressed genes: DAF vs CMT"
 )
@@ -1031,6 +1044,8 @@ plotDispEsts(dds_location, main = "Design: ~ location")
 ```
 
 ```{r}
+#This is the model we will be going with
+
 dds_interaction <- DESeqDataSetFromMatrix(
   countData = count_matrix,
   colData = coldata,
@@ -1048,4 +1063,245 @@ plotDispEsts(
 )
 
 resultsNames(dds_interaction)
+```
+
+```{r}
+dds_month <- DESeqDataSetFromMatrix(
+  countData = count_matrix,
+  colData = coldata,
+  design = ~ month
+)
+
+dds_month <- dds_month[rowSums(counts(dds_month) >= 10) >= 3, ]
+dds_month <- DESeq(dds_month)
+
+plotDispEsts(dds_month, main = "Design: ~ month")
+```
+
+Pair Wise Comparisons
+
+Main model design: design = \~ month \* location
+
+1.  Run interaction model
+
+```{r}
+library(DESeq2)
+library(dplyr)
+
+dds_interaction <- DESeqDataSetFromMatrix(
+  countData = count_matrix,
+  colData = coldata,
+  design = ~ month * location
+)
+
+keep <- rowSums(counts(dds_interaction) >= 10) >= 3
+dds_interaction <- dds_interaction[keep, ]
+
+dds_interaction <- DESeq(dds_interaction)
+
+plotDispEsts(
+  dds_interaction,
+  main = "Design: ~ month * location"
+)
+
+resultsNames(dds_interaction)
+```
+
+2.  DAF vs CMT in June
+
+```{r}
+res_DAF_vs_CMT_Jun <- results(
+  dds_interaction,
+  name = "location_DAF_vs_CMT"
+)
+
+summary(res_DAF_vs_CMT_Jun)
+```
+
+3.  DAF vs CMT in July
+
+```{r}
+res_DAF_vs_CMT_Jul <- results(
+  dds_interaction,
+  contrast = list(
+    c("location_DAF_vs_CMT", "monthJul.locationDAF")
+  )
+)
+
+summary(res_DAF_vs_CMT_Jul)
+```
+
+4.  DAF vs CMT in August
+
+```{r}
+res_DAF_vs_CMT_Aug <- results(
+  dds_interaction,
+  contrast = list(
+    c("location_DAF_vs_CMT", "monthAug.locationDAF")
+  )
+)
+
+summary(res_DAF_vs_CMT_Aug)
+```
+
+5.  Convert all to a dataframe
+
+```{r}
+
+res_Jun_df <- as.data.frame(res_DAF_vs_CMT_Jun) |>
+  tibble::rownames_to_column("gene_id") |>
+  arrange(padj)
+
+res_Jul_df <- as.data.frame(res_DAF_vs_CMT_Jul) |>
+  tibble::rownames_to_column("gene_id") |>
+  arrange(padj)
+
+res_Aug_df <- as.data.frame(res_DAF_vs_CMT_Aug) |>
+  tibble::rownames_to_column("gene_id") |>
+  arrange(padj)
+```
+
+7.  Count significant genes for each month
+
+```{r}
+sig_summary <- data.frame(
+  comparison = c("DAF vs CMT in Jun", "DAF vs CMT in Jul", "DAF vs CMT in Aug"),
+  padj_0.05 = c(
+    sum(!is.na(res_Jun_df$padj) & res_Jun_df$padj < 0.05),
+    sum(!is.na(res_Jul_df$padj) & res_Jul_df$padj < 0.05),
+    sum(!is.na(res_Aug_df$padj) & res_Aug_df$padj < 0.05)
+  ),
+  padj_0.05_lfc_1 = c(
+    sum(!is.na(res_Jun_df$padj) & res_Jun_df$padj < 0.05 & abs(res_Jun_df$log2FoldChange) >= 1),
+    sum(!is.na(res_Jul_df$padj) & res_Jul_df$padj < 0.05 & abs(res_Jul_df$log2FoldChange) >= 1),
+    sum(!is.na(res_Aug_df$padj) & res_Aug_df$padj < 0.05 & abs(res_Aug_df$log2FoldChange) >= 1)
+  )
+)
+
+sig_summary
+```
+
+8.  Save results
+
+```{r}
+write.csv(res_Jun_df, "DESeq2_DAF_vs_CMT_Jun_results.csv", row.names = FALSE)
+write.csv(res_Jul_df, "DESeq2_DAF_vs_CMT_Jul_results.csv", row.names = FALSE)
+write.csv(res_Aug_df, "DESeq2_DAF_vs_CMT_Aug_results.csv", row.names = FALSE)
+
+write.csv(sig_summary, "DESeq2_pairwise_monthly_summary.csv", row.names = FALSE)
+```
+
+9.  Comparison Plot
+
+```{r}
+library(ggplot2)
+
+ggplot(sig_summary, aes(x = comparison, y = padj_0.05_lfc_1)) +
+  geom_col() +
+  theme_bw() +
+  coord_flip() +
+  labs(
+    title = "Significant DAF vs CMT genes by month",
+    x = "Comparison",
+    y = "Number of significant genes\npadj < 0.05 and |log2FC| >= 1"
+  )
+```
+
+Outlier Check
+
+```{r}
+assays(dds_interaction)[["cooks"]][1:5, 1:5]
+
+cooks <- assays(dds_interaction)[["cooks"]]
+
+sample_cooks_summary <- data.frame(
+  sample = colnames(cooks),
+  median_cooks = apply(cooks, 2, median, na.rm = TRUE),
+  mean_cooks = apply(cooks, 2, mean, na.rm = TRUE),
+  max_cooks = apply(cooks, 2, max, na.rm = TRUE)
+)
+
+sample_cooks_summary[order(sample_cooks_summary$mean_cooks, decreasing = TRUE), ]
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(sample_cooks_summary, aes(x = reorder(sample, mean_cooks), y = mean_cooks)) +
+  geom_col() +
+  coord_flip() +
+  theme_bw() +
+  labs(
+    title = "Average Cook's distance by sample",
+    x = "Sample",
+    y = "Mean Cook's distance"
+  )
+```
+
+```{r}
+res_DAF_vs_CMT_Jun_noCook <- results(
+  dds_interaction,
+  name = "location_DAF_vs_CMT",
+  cooksCutoff = FALSE
+)
+
+res_DAF_vs_CMT_Jul_noCook <- results(
+  dds_interaction,
+  contrast = list(c("location_DAF_vs_CMT", "monthJul.locationDAF")),
+  cooksCutoff = FALSE
+)
+
+res_DAF_vs_CMT_Aug_noCook <- results(
+  dds_interaction,
+  contrast = list(c("location_DAF_vs_CMT", "monthAug.locationDAF")),
+  cooksCutoff = FALSE
+)
+```
+
+```{r}
+data.frame(
+  comparison = c("Jun", "Jul", "Aug"),
+  sig_with_cooks_filter = c(
+    sum(!is.na(res_DAF_vs_CMT_Jun$padj) & res_DAF_vs_CMT_Jun$padj < 0.05),
+    sum(!is.na(res_DAF_vs_CMT_Jul$padj) & res_DAF_vs_CMT_Jul$padj < 0.05),
+    sum(!is.na(res_DAF_vs_CMT_Aug$padj) & res_DAF_vs_CMT_Aug$padj < 0.05)
+  ),
+  sig_without_cooks_filter = c(
+    sum(!is.na(res_DAF_vs_CMT_Jun_noCook$padj) & res_DAF_vs_CMT_Jun_noCook$padj < 0.05),
+    sum(!is.na(res_DAF_vs_CMT_Jul_noCook$padj) & res_DAF_vs_CMT_Jul_noCook$padj < 0.05),
+    sum(!is.na(res_DAF_vs_CMT_Aug_noCook$padj) & res_DAF_vs_CMT_Aug_noCook$padj < 0.05)
+  )
+)
+```
+
+For each sample, how many genes have a very high Cooks Distance?\
+
+```{r}
+cooks <- assays(dds_interaction)[["cooks"]]
+
+cooks_by_sample <- data.frame(
+  sample = colnames(cooks),
+  mean_cooks = apply(cooks, 2, mean, na.rm = TRUE),
+  median_cooks = apply(cooks, 2, median, na.rm = TRUE),
+  max_cooks = apply(cooks, 2, max, na.rm = TRUE),
+  genes_cooks_gt_1 = colSums(cooks > 1, na.rm = TRUE),
+  genes_cooks_gt_5 = colSums(cooks > 5, na.rm = TRUE),
+  genes_cooks_gt_10 = colSums(cooks > 10, na.rm = TRUE)
+)
+
+cooks_by_sample[order(cooks_by_sample$genes_cooks_gt_1, decreasing = TRUE), ]
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(cooks_by_sample, aes(x = reorder(sample, genes_cooks_gt_1), y = genes_cooks_gt_1)) +
+  geom_col() +
+  coord_flip() +
+  theme_bw() +
+  labs(
+    title = "Number of genes with Cook's distance > 1 by sample",
+    x = "Sample",
+    y = "Genes with Cook's distance > 1"
+  )
 ```
