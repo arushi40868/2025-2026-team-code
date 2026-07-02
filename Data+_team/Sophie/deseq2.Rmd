@@ -241,9 +241,11 @@ dds_time$Location <- relevel(dds_time$Location, ref = "DAF")
 #     reduced = ~ Location
 # )
 
+# filter
 keep <- rowSums(counts(dds_time) >= 10) >=3
 dds_time <- dds_time[keep,]
 
+# run DESeq2
 dds_time <- DESeq(dds_time)
 
 results_time <- results(dds_time)
