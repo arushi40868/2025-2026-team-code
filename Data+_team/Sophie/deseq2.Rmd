@@ -231,6 +231,9 @@ dds_time <- DESeqDataSet(
     design = ~ Location * Month
 )
 
+# set DAF as the reference
+dds_time$Location <- relevel(dds_time$Location, ref = "DAF")
+
 # create new object with likelihood ratio test (LRT) between simpler model (just location) and more complex model (location and month)
 #  dds_time <- DESeq(
 #     dds_time,
@@ -240,6 +243,8 @@ dds_time <- DESeqDataSet(
 
 keep <- rowSums(counts(dds_time) >= 10) >=3
 dds_time <- dds_time[keep,]
+
+dds_time <- DESeq(dds_time)
 
 results_time <- results(dds_time)
 
@@ -280,25 +285,31 @@ ggplot(plot_df,
   labs(y = "VST-normalized expression",
        x = "Month")
 ```
-# Run DESeq2 Subset by Month
+# DESeq2 Results Subset by Month
 ```{r}
 # june
-dds_june <- dds_time[, colData(dds_time)$Month == "June"]
-design(dds_june) <- ~ Location
-dds_june <- DESeq(dds_june)
-results_june <- results(dds_june)
+results_june <- results(
+  dds_time,
+  alpha = 0.05,
+  name = "Location_CMT_vs_DAF")
 
 # july
-dds_july <- dds_time[, colData(dds_time)$Month == "July"]
-design(dds_july) <- ~ Location
-dds_july <- DESeq(dds_july)
-results_july <- results(dds_july)
+results_july <- results(
+  dds_time,
+  alpha = 0.05,
+  contrast = list(
+    c("Location_CMT_vs_DAF", "LocationCMT.MonthJuly")
+  )
+)
 
 # august
-dds_august <- dds_time[, colData(dds_time)$Month == "August"]
-design(dds_august) <- ~ Location
-dds_august <- DESeq(dds_august)
-results_august <- results(dds_august)
+results_august <- results(
+  dds_time,
+  alpha = 0.05,
+  contrast = list(
+    c("Location_CMT_vs_DAF", "LocationCMT.MonthAugust")
+  )
+)
 ```
 
 # Pairwise Comparison MA Plots (DAF vs. CMT for each month)
@@ -403,51 +414,47 @@ plot_volcano(
 )
 ```
 
-# Run DESeq2 Subset by Location
+# DESeq2 Results Subset by Location
 ```{r}
-# DAF
-dds_daf <- dds_time[, colData(dds_time)$Location == "DAF"]
-dds_daf$Month <- relevel(dds_daf$Month, ref = "June")
-design(dds_daf) <- ~ Month
-dds_daf <- DESeq(dds_daf)
-
 # DAF July vs. June
 results_daf_july_june <- results(
-  dds_daf, contrast = c("Month", "July", "June")
+  dds_time, 
+  alpha = 0.05,
+  name = "Month_July_vs_June"
 )
 
 # DAF August vs. June
 results_daf_august_june <- results(
-  dds_daf, contrast = c("Month", "August", "June")
+  dds_time, 
+  alpha = 0.05,
+  name = "Month_August_vs_June"
 )
 
 # DAF August vs. July
 results_daf_august_july <- results(
-  dds_daf, contrast = c("Month", "August", "July")
+  dds_time, 
+  alpha = 0.05,
+  contrast = list("Month_August_vs_June", "Month_July_vs_June")
 )
-
-# CMT
-dds_cmt <- dds_time[, colData(dds_time)$Location == "CMT"]
-dds_cmt$Month <- relevel(dds_cmt$Month, ref = "June")
-design(dds_cmt) <- ~ Month
-dds_cmt <- DESeq(dds_cmt)
 
 # CMT July vs. June
 results_cmt_july_june <- results(
-  dds_cmt,
-  contrast = c("Month", "July", "June")
+  dds_time,
+  alpha = 0.05,
+  contrast = list(c("Month_July_vs_June", "LocationCMT.MonthJuly"))
 )
 
 # CMT August vs. June
 results_cmt_august_june <- results(
-  dds_cmt,
-  contrast = c("Month", "August", "June")
+  dds_time,
+  alpha = 0.05,
+  contrast = list(c("Month_August_vs_June", "LocationCMT.MonthAugust"))
 )
 
 # CMT August vs. July
 results_cmt_august_july <- results(
-  dds_cmt,
-  contrast = c("Month", "August", "July")
+  dds_time,
+  contrast = list(c("Month_August_vs_June", "LocationCMT.MonthAugust"), c("Month_July_vs_June", "LocationCMT.MonthJuly"))
 )
 ```
 
@@ -1019,13 +1026,16 @@ saveRDS(col_data, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_te
 # save environmental data matrix
 saveRDS(env_mat, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/env_mat.rds")
 
-# save pairwise comparisons (between each location per month)
-saveRDS(dds_june, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/dds_june.rds")
-saveRDS(dds_july, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/dds_july.rds")
-saveRDS(dds_august, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/dds_august.rds")
+# save pairwise comparisons results (between each location per month)
+saveRDS(results_june, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/results_june.rds")
+saveRDS(results_july, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/results_july.rds")
+saveRDS(results_august, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/results_august.rds")
 
 # save pairwise comparisons (between each month per location)
-saveRDS(dds_daf, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/dds_daf.rds")
-saveRDS(dds_cmt, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/dds_cmt.rds")
-
+saveRDS(results_daf_july_june, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/results_daf_july_june.rds")
+saveRDS(results_daf_august_june, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/results_daf_august_june.rds")
+saveRDS(results_daf_august_july, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/results_daf_august_july.rds")
+saveRDS(results_cmt_july_june, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/results_cmt_july_june.rds")
+saveRDS(results_cmt_august_june, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/results_cmt_august_june.rds")
+saveRDS(results_cmt_august_july, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/results_cmt_august_july.rds")
 ```
