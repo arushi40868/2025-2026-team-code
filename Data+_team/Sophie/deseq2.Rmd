@@ -454,6 +454,7 @@ results_cmt_august_june <- results(
 # CMT August vs. July
 results_cmt_august_july <- results(
   dds_time,
+  alpha = 0.05,
   contrast = list(c("Month_August_vs_June", "LocationCMT.MonthAugust"), c("Month_July_vs_June", "LocationCMT.MonthJuly"))
 )
 ```
