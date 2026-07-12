@@ -1,5 +1,5 @@
 ---
-title: "RNA Sequencing - Oyesters"
+title: "RNA Sequencing - Oysters"
 output:
   html_document:
     df_print: paged
@@ -471,7 +471,7 @@ dds <- dds[keep, ]
 
 dds <- DESeq(dds)
 
-plotDispEsts(dds, main = "Dispersion estimates using Arushi featureCounts")
+plotDispEsts(dds, main = "Dispersion estimates using featureCounts")
 ```
 
 5.  Run DESeq2
@@ -1304,4 +1304,1139 @@ ggplot(cooks_by_sample, aes(x = reorder(sample, genes_cooks_gt_1), y = genes_coo
     x = "Sample",
     y = "Genes with Cook's distance > 1"
   )
+```
+
+WGCNA
+
+```{r}
+library(DESeq2)
+library(WGCNA)
+library(tidyverse)
+library(matrixStats)
+library(pheatmap)
+
+options(stringsAsFactors = FALSE)
+allowWGCNAThreads()
+```
+
+Step 1: Start from cleaned count matrix and metadata
+
+```{r}
+dim(count_matrix)
+dim(coldata)
+
+all(rownames(coldata) == colnames(count_matrix))
+table(coldata$location, coldata$month)
+```
+
+Step 2: Create a DESeq2 object for normalization
+
+```{r}
+dds_wgcna <- DESeqDataSetFromMatrix(
+  countData = count_matrix,
+  colData = coldata,
+  design = ~ month * location
+)
+
+keep <- rowSums(counts(dds_wgcna) >= 10) >= 3
+dds_wgcna <- dds_wgcna[keep, ]
+
+dds_wgcna <- DESeq(dds_wgcna)
+```
+
+Step 3: Variance stabilize the counts
+
+```{r}
+vsd_wgcna <- vst(dds_wgcna, blind = FALSE)
+
+expr_vst <- assay(vsd_wgcna)
+
+dim(expr_vst)
+expr_vst[1:5, 1:5]
+```
+
+Step 4: Filter to the most variable genes
+
+```{r}
+gene_variances <- rowVars(expr_vst)
+
+summary(gene_variances)
+
+q95 <- quantile(gene_variances, 0.95)
+
+expr_filtered <- expr_vst[gene_variances > q95, ]
+
+dim(expr_filtered)
+```
+
+Step 5: Transpose for WGCNA
+
+```{r}
+datExpr <- t(expr_filtered)
+
+dim(datExpr)
+datExpr[1:5, 1:5]
+```
+
+Step 6: Check for bad samples or bad genes
+
+```{r}
+gsg <- goodSamplesGenes(datExpr, verbose = 3)
+
+gsg$allOK
+```
+
+```{r}
+sampleTree <- hclust(dist(datExpr), method = "average")
+
+plot(
+  sampleTree,
+  main = "Sample clustering for WGCNA",
+  sub = "",
+  xlab = "",
+  cex.lab = 1.2,
+  cex.axis = 1.2,
+  cex.main = 1.5
+)
+```
+
+Step 7: Choose soft threshholding power
+
+```{r}
+powers <- c(1:10, seq(12, 20, by = 2))
+
+sft <- pickSoftThreshold(
+  datExpr,
+  powerVector = powers,
+  networkType = "signed",
+  verbose = 5
+)
+```
+
+```{r}
+par(mfrow = c(1, 2))
+
+cex1 <- 0.9
+
+plot(
+  sft$fitIndices[, 1],
+  -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+  xlab = "Soft Threshold (power)",
+  ylab = "Scale Free Topology Model Fit, signed R^2",
+  type = "n",
+  main = "Scale independence"
+)
+
+text(
+  sft$fitIndices[, 1],
+  -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2],
+  labels = powers,
+  cex = cex1,
+  col = "red"
+)
+
+abline(h = 0.80, col = "red")
+
+plot(
+  sft$fitIndices[, 1],
+  sft$fitIndices[, 5],
+  xlab = "Soft Threshold (power)",
+  ylab = "Mean Connectivity",
+  type = "n",
+  main = "Mean connectivity"
+)
+
+text(
+  sft$fitIndices[, 1],
+  sft$fitIndices[, 5],
+  labels = powers,
+  cex = cex1,
+  col = "red"
+)
+```
+
+Step 8: Build WGCNA modules
+
+```{r}
+picked_power <- 8 
+
+net <- blockwiseModules(
+  datExpr,
+  power = picked_power,
+  networkType = "signed",
+  TOMType = "signed",
+  deepSplit = 2,
+  pamRespectsDendro = FALSE,
+  minModuleSize = 30,
+  mergeCutHeight = 0.25,
+  numericLabels = TRUE,
+  saveTOMs = TRUE,
+  saveTOMFileBase = "oyster_WGCNA_TOM",
+  verbose = 3
+)
+```
+
+```{r}
+table(net$colors)
+```
+
+```{r}
+module_colors <- labels2colors(net$colors)
+
+table(module_colors)
+```
+
+Step 9: Gene Dendrogram and module colors
+
+```{r}
+plotDendroAndColors(
+  net$dendrograms[[1]],
+  module_colors[net$blockGenes[[1]]],
+  "Module colors",
+  dendroLabels = FALSE,
+  hang = 0.03,
+  addGuide = TRUE,
+  guideHang = 0.05
+)
+```
+
+Step 10: Save
+
+```{r}
+module_df <- data.frame(
+  gene_id = colnames(datExpr),
+  module = module_colors
+)
+
+head(module_df)
+table(module_df$module)
+
+write.csv(module_df, "WGCNA_gene_modules.csv", row.names = FALSE)
+```
+
+Step 11: Relate modules to sample traits
+
+```{r}
+trait_df <- coldata[rownames(datExpr), ]
+
+trait_numeric <- data.frame(
+  location_DAF = ifelse(trait_df$location == "DAF", 1, 0),
+  month_Jun = ifelse(trait_df$month == "Jun", 1, 0),
+  month_Jul = ifelse(trait_df$month == "Jul", 1, 0),
+  month_Aug = ifelse(trait_df$month == "Aug", 1, 0),
+  oyster_SJ1 = ifelse(trait_df$oyster_id == "SJ1", 1, 0),
+  oyster_SJ2 = ifelse(trait_df$oyster_id == "SJ2", 1, 0),
+  oyster_SJ3 = ifelse(trait_df$oyster_id == "SJ3", 1, 0)
+)
+
+rownames(trait_numeric) <- rownames(trait_df)
+
+trait_numeric
+```
+
+```{r}
+MEs <- moduleEigengenes(datExpr, colors = module_colors)$eigengenes
+MEs <- orderMEs(MEs)
+
+head(MEs)
+```
+
+```{r}
+module_trait_cor <- cor(MEs, trait_numeric, use = "p")
+module_trait_pvalue <- corPvalueStudent(module_trait_cor, nSamples = nrow(datExpr))
+```
+
+```{r}
+text_matrix <- paste0(
+  signif(module_trait_cor, 2),
+  "\n(",
+  signif(module_trait_pvalue, 2),
+  ")"
+)
+
+dim(text_matrix) <- dim(module_trait_cor)
+```
+
+```{r}
+labeledHeatmap(
+  Matrix = module_trait_cor,
+  xLabels = names(trait_numeric),
+  yLabels = names(MEs),
+  ySymbols = names(MEs),
+  colorLabels = FALSE,
+  colors = blueWhiteRed(50),
+  textMatrix = text_matrix,
+  setStdMargins = FALSE,
+  cex.text = 0.7,
+  zlim = c(-1, 1),
+  main = "Module-trait relationships"
+)
+```
+
+```         
+```
+
+Gene Ontology
+
+Running a few checks below
+
+```{r}
+ru17_dir <- "/work/clh162/OysterRNA24/DEG_analysis/GO/Cvi_RU17_ncbi_dataset"
+
+file.exists(ru17_dir)
+list.files(ru17_dir, recursive = TRUE)
+```
+
+```{r}
+ru17_files <- list.files(ru17_dir, recursive = TRUE, full.names = TRUE)
+
+ru17_files[grepl("go|annot|summary|gaf|tsv|csv|txt|faa|protein", ru17_files, ignore.case = TRUE)]
+```
+
+```{r}
+jun_res <- read.csv("DESeq2_DAF_vs_CMT_Jun_results.csv")
+
+dim(jun_res)
+colnames(jun_res)
+head(jun_res)
+```
+
+```{r}
+list.files(
+  "/work/clh162/OysterRNA24/DEG_analysis/GO",
+  pattern = "diamond|blast|dmnd|matches|out|tsv",
+  recursive = TRUE,
+  full.names = TRUE,
+  ignore.case = TRUE
+)
+```
+
+```{r}
+diamond_file <- "/work/clh162/OysterRNA24/DEG_analysis/GO/diamond/RU17_to_RU25_diamond.tsv"
+
+diamond <- read.delim(
+  diamond_file,
+  header = FALSE,
+  stringsAsFactors = FALSE
+)
+
+dim(diamond)
+head(diamond)
+```
+
+```{r}
+colnames(diamond) <- c(
+  "query_id", "subject_id", "pident", "length", "mismatch",
+  "gapopen", "qstart", "qend", "sstart", "send", "evalue", "bitscore"
+)
+
+head(diamond)
+```
+
+```{r}
+head(diamond$query_id)
+head(diamond$subject_id)
+
+head(jun_res$gene_id)
+
+sum(jun_res$gene_id %in% diamond$query_id)
+sum(jun_res$gene_id %in% diamond$subject_id)
+```
+
+```{r}
+library(tidyverse)
+
+ru25_gff <- "/work/clh162/OysterRNA24/hisat2_align/Cv_genome_RU_2025_shared/Cvi_RU25.gff3"
+
+gff_lines <- readLines(ru25_gff, warn = FALSE)
+gff_lines <- gff_lines[!grepl("^#", gff_lines)]
+
+gff <- read.delim(
+  text = gff_lines,
+  header = FALSE,
+  sep = "\t",
+  stringsAsFactors = FALSE,
+  quote = "",
+  comment.char = ""
+)
+
+colnames(gff) <- c(
+  "seqid", "source", "type", "start", "end", "score",
+  "strand", "phase", "attributes"
+)
+
+table(gff$type)
+
+gff %>%
+  filter(grepl("evm.TU|evm.model", attributes)) %>%
+  select(type, attributes) %>%
+  head(30)
+```
+
+```{r}
+tu_model_map <- gff %>%
+  filter(grepl("evm.model", attributes), grepl("evm.TU", attributes)) %>%
+  mutate(
+    model_id = stringr::str_extract(attributes, "evm\\.model\\.[^;]+"),
+    gene_id = stringr::str_extract(attributes, "evm\\.TU\\.[^;]+")
+  ) %>%
+  filter(!is.na(model_id), !is.na(gene_id)) %>%
+  distinct(gene_id, model_id)
+
+dim(tu_model_map)
+head(tu_model_map)
+```
+
+```{r}
+sum(jun_res$gene_id %in% tu_model_map$gene_id)
+head(tu_model_map)
+```
+
+```{r}
+diamond_best <- diamond %>%
+  arrange(query_id, evalue, desc(bitscore)) %>%
+  group_by(query_id) %>%
+  slice(1) %>%
+  ungroup()
+
+gene_to_ru17 <- tu_model_map %>%
+  left_join(diamond_best, by = c("model_id" = "query_id"))
+
+dim(gene_to_ru17)
+head(gene_to_ru17)
+
+sum(!is.na(gene_to_ru17$subject_id))
+```
+
+```{r}
+gaf_file <- "/work/clh162/OysterRNA24/DEG_analysis/GO/Cvi_RU17_ncbi_dataset/data/GCF_002022765.2/GCF_002022765.2_C_virginica-3.0_gene_ontology.gaf"
+
+gaf <- read.delim(
+  gaf_file,
+  comment.char = "!",
+  header = FALSE,
+  stringsAsFactors = FALSE
+)
+
+dim(gaf)
+head(gaf)
+
+go_map <- gaf[, c(2, 5)]
+colnames(go_map) <- c("ru17_id", "GO")
+
+go_map <- go_map %>%
+  filter(!is.na(GO), GO != "") %>%
+  distinct()
+
+head(go_map)
+```
+
+```{r}
+ru17_map_file <- "/work/clh162/OysterRNA24/DEG_analysis/GO/Cvi_RU17_ncbi_dataset/data/GCF_002022765.2/Cvi_RU17_gene_proteinID.csv"
+
+ru17_map <- read.csv(ru17_map_file, stringsAsFactors = FALSE)
+
+dim(ru17_map)
+colnames(ru17_map)
+head(ru17_map)
+```
+
+```{r}
+# Clean RU17 map
+ru17_map_clean <- ru17_map %>%
+  mutate(
+    ru17_gene_numeric = stringr::str_remove(gene, "^LOC"),
+    protein_id = as.character(protein_id)
+  )
+
+head(ru17_map_clean)
+```
+
+```{r}
+go_map_clean <- go_map %>%
+  mutate(
+    ru17_gene_numeric = as.character(ru17_id)
+  ) %>%
+  select(ru17_gene_numeric, GO) %>%
+  distinct()
+
+head(go_map_clean)
+```
+
+```{r}
+gene_to_go <- gene_to_ru17 %>%
+  left_join(
+    ru17_map_clean,
+    by = c("subject_id" = "protein_id")
+  ) %>%
+  inner_join(
+    go_map_clean,
+    by = "ru17_gene_numeric"
+  ) %>%
+  select(GO, gene_id) %>%
+  distinct()
+
+dim(gene_to_go)
+head(gene_to_go)
+length(unique(gene_to_go$gene_id))
+length(unique(gene_to_go$GO))
+```
+
+```{r}
+sum(gene_to_ru17$subject_id %in% ru17_map_clean$protein_id)
+sum(ru17_map_clean$ru17_gene_numeric %in% go_map_clean$ru17_gene_numeric)
+```
+
+```{r}
+library(clusterProfiler)
+library(enrichplot)
+
+TERM2GENE <- gene_to_go %>%
+  select(GO, gene_id) %>%
+  distinct()
+
+run_go <- function(res_file, label) {
+  
+  res <- read.csv(res_file, stringsAsFactors = FALSE)
+  
+  sig_genes <- res %>%
+    filter(!is.na(padj), padj < 0.05) %>%
+    pull(gene_id) %>%
+    unique()
+  
+  message(label, ": ", length(sig_genes), " significant genes")
+  
+  ego <- enricher(
+    gene = sig_genes,
+    TERM2GENE = TERM2GENE,
+    pvalueCutoff = 0.05,
+    qvalueCutoff = 0.2
+  )
+  
+  ego_df <- as.data.frame(ego)
+  
+  write.csv(
+    ego_df,
+    paste0("GO_enrichment_", label, ".csv"),
+    row.names = FALSE
+  )
+  
+  if (nrow(ego_df) > 0) {
+    pdf(paste0("GO_dotplot_", label, ".pdf"), width = 9, height = 7)
+    print(dotplot(ego, showCategory = 20))
+    dev.off()
+  }
+  
+  return(ego)
+}
+
+ego_jun <- run_go("DESeq2_DAF_vs_CMT_Jun_results.csv", "DAF_vs_CMT_Jun")
+ego_jul <- run_go("DESeq2_DAF_vs_CMT_Jul_results.csv", "DAF_vs_CMT_Jul")
+ego_aug <- run_go("DESeq2_DAF_vs_CMT_Aug_results.csv", "DAF_vs_CMT_Aug")
+```
+
+```{r}
+jun_go <- read.csv("GO_enrichment_DAF_vs_CMT_Jun.csv")
+jul_go <- read.csv("GO_enrichment_DAF_vs_CMT_Jul.csv")
+aug_go <- read.csv("GO_enrichment_DAF_vs_CMT_Aug.csv")
+
+dim(jun_go)
+dim(jul_go)
+dim(aug_go)
+
+head(jun_go)
+head(jul_go)
+head(aug_go)
+```
+
+```{r}
+list.files(pattern = "GO_dotplot|GO_enrichment")
+```
+
+```{r}
+jul_go <- read.csv("GO_enrichment_DAF_vs_CMT_Jul.csv")
+
+jul_go[, c("ID", "Description", "GeneRatio", "BgRatio", "pvalue", "p.adjust", "qvalue", "Count")]
+```
+
+```{r}
+check_mapping <- function(res_file, label) {
+  res <- read.csv(res_file, stringsAsFactors = FALSE)
+  
+  sig_genes <- res %>%
+    filter(!is.na(padj), padj < 0.05) %>%
+    pull(gene_id) %>%
+    unique()
+  
+  mapped_sig <- sig_genes[sig_genes %in% TERM2GENE$gene_id]
+  
+  data.frame(
+    comparison = label,
+    significant_genes = length(sig_genes),
+    sig_genes_with_GO = length(mapped_sig),
+    percent_mapped = round(100 * length(mapped_sig) / length(sig_genes), 2)
+  )
+}
+
+mapping_summary <- bind_rows(
+  check_mapping("DESeq2_DAF_vs_CMT_Jun_results.csv", "June"),
+  check_mapping("DESeq2_DAF_vs_CMT_Jul_results.csv", "July"),
+  check_mapping("DESeq2_DAF_vs_CMT_Aug_results.csv", "August")
+)
+
+mapping_summary
+write.csv(mapping_summary, "GO_mapping_summary.csv", row.names = FALSE)
+```
+
+```{r}
+run_go_relaxed <- function(res_file, label) {
+  
+  res <- read.csv(res_file, stringsAsFactors = FALSE)
+  
+  sig_genes <- res %>%
+    filter(!is.na(padj), padj < 0.05) %>%
+    pull(gene_id) %>%
+    unique()
+  
+  message(label, ": ", length(sig_genes), " significant genes")
+  
+  ego <- enricher(
+    gene = sig_genes,
+    TERM2GENE = TERM2GENE,
+    pvalueCutoff = 0.1,
+    qvalueCutoff = 0.3
+  )
+  
+  ego_df <- as.data.frame(ego)
+  
+  write.csv(
+    ego_df,
+    paste0("GO_enrichment_RELAXED_", label, ".csv"),
+    row.names = FALSE
+  )
+  
+  if (nrow(ego_df) > 0) {
+    pdf(paste0("GO_dotplot_RELAXED_", label, ".pdf"), width = 9, height = 7)
+    print(dotplot(ego, showCategory = 20))
+    dev.off()
+  }
+  
+  return(ego)
+}
+```
+
+```{r}
+ego_jun_relaxed <- run_go_relaxed("DESeq2_DAF_vs_CMT_Jun_results.csv", "DAF_vs_CMT_Jun")
+ego_jul_relaxed <- run_go_relaxed("DESeq2_DAF_vs_CMT_Jul_results.csv", "DAF_vs_CMT_Jul")
+ego_aug_relaxed <- run_go_relaxed("DESeq2_DAF_vs_CMT_Aug_results.csv", "DAF_vs_CMT_Aug")
+```
+
+```{r}
+jun_go_relaxed <- read.csv("GO_enrichment_RELAXED_DAF_vs_CMT_Jun.csv")
+jul_go_relaxed <- read.csv("GO_enrichment_RELAXED_DAF_vs_CMT_Jul.csv")
+aug_go_relaxed <- read.csv("GO_enrichment_RELAXED_DAF_vs_CMT_Aug.csv")
+
+dim(jun_go_relaxed)
+dim(jul_go_relaxed)
+dim(aug_go_relaxed)
+
+list.files(pattern = "GO_dotplot_RELAXED|GO_enrichment_RELAXED")
+```
+
+```{r}
+list.files(pattern = "RELAXED")
+```
+
+```{r}
+jun_go_relaxed %>%
+  select(ID, Description, GeneRatio, BgRatio, pvalue, p.adjust, qvalue, Count)
+
+jul_go_relaxed %>%
+  select(ID, Description, GeneRatio, BgRatio, pvalue, p.adjust, qvalue, Count)
+```
+
+Using the original enrichment thresholds, July was the only monthly DAF vs CMT comparison with enriched GO terms. When exploratory relaxed thresholds were used, June showed two enriched terms, July showed eleven, and August showed none. This suggests that functional enrichment is strongest in July, while August’s larger number of differentially expressed genes may be more dispersed across functional categories rather than concentrated in specific GO processes.
+
+The GO results suggest that July site differences may reflect a more coordinated biological response, while August differential expression may be more functionally dispersed. Adding environmental variables could help determine whether July’s enriched functions correspond to specific environmental differences, and whether August’s larger but less enriched gene set reflects a more complex or mixed environmental response.
+
+WGCNA Environmental
+
+A few checks first:
+
+```{r}
+dim(datExpr)
+head(rownames(datExpr))
+```
+
+```{r}
+dim(MEs)
+head(rownames(MEs))
+colnames(MEs)
+```
+
+Creating environmental data csv
+
+```{r}
+cleaned_dir <- "/work/clh162/Data+/Arushi/2025-2026-team-code/Cleaned"
+```
+
+```{r}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(lubridate)
+library(janitor)
+
+# 1. Paths
+
+cleaned_dir <- "/work/clh162/Data+/Arushi/2025-2026-team-code/Cleaned"
+
+sample_file <- "/work/clh162/OysterRNA24/xRNA for BC Summer 2024.xlsx"
+
+# 2. Read RNA sample metadata
+
+samples_raw <- readxl::read_excel(
+  "/work/clh162/OysterRNA24/xRNA for BC Summer 2024.xlsx",
+  skip = 1
+)
+
+head(samples_raw)
+colnames(samples_raw)
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(readxl)
+library(janitor)
+
+samples_raw <- read_excel(
+  "/work/clh162/OysterRNA24/xRNA for BC Summer 2024.xlsx",
+  skip = 1
+) %>%
+  clean_names()
+
+colnames(samples_raw)
+head(samples_raw)
+```
+
+```{r}
+samples <- samples_raw %>%
+  mutate(
+    sample_id = sample_id,
+    location = toupper(location),
+    oyster = str_extract(sample_id, "SJ[123]"),
+    date_collected = as.Date(date_collected, origin = "1899-12-30"),
+    month = case_when(
+      month(date_collected) == 6 ~ "Jun",
+      month(date_collected) == 7 ~ "Jul",
+      month(date_collected) == 8 ~ "Aug",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  select(sample_id, location, month, oyster, date_collected)
+
+samples
+```
+
+```{r}
+dim(samples)
+table(samples$location, samples$month)
+```
+
+```{r}
+read_env_monthly <- function(file, station, variable) {
+  
+  df <- read_excel(file) %>%
+    clean_names()
+  
+  print(file)
+  print(colnames(df))
+  
+  date_col <- colnames(df)[str_detect(colnames(df), "date|time|datetime|sample_date")][1]
+  
+  numeric_cols <- df %>%
+    select(where(is.numeric)) %>%
+    colnames()
+  
+  value_col <- numeric_cols[1]
+  
+  if (is.na(date_col) | is.na(value_col)) {
+    stop(paste("Could not identify date/value columns for:", file))
+  }
+  
+  df %>%
+    mutate(
+      date = as.Date(.data[[date_col]]),
+      month = case_when(
+        month(date) == 6 ~ "Jun",
+        month(date) == 7 ~ "Jul",
+        month(date) == 8 ~ "Aug",
+        TRUE ~ NA_character_
+      ),
+      station = station,
+      variable = variable,
+      value = as.numeric(.data[[value_col]])
+    ) %>%
+    filter(!is.na(month)) %>%
+    group_by(station, month, variable) %>%
+    summarise(
+      mean_value = mean(value, na.rm = TRUE),
+      median_value = median(value, na.rm = TRUE),
+      n_obs = sum(!is.na(value)),
+      .groups = "drop"
+    )
+}
+```
+
+```{r}
+env_monthly <- bind_rows(
+  read_env_monthly(file.path(cleaned_dir, "CMAST_Con_Cleaned.xlsx"), "CMAST", "conductivity"),
+  read_env_monthly(file.path(cleaned_dir, "CMAST_DO_Cleaned.xlsx"), "CMAST", "DO"),
+  read_env_monthly(file.path(cleaned_dir, "CMAST_pH_Cleaned.xlsx"), "CMAST", "pH"),
+  read_env_monthly(file.path(cleaned_dir, "CMAST_Precip_Cleaned.xlsx"), "CMAST", "precip"),
+  
+  read_env_monthly(file.path(cleaned_dir, "DUML_Con_Cleaned.xlsx"), "DUML", "conductivity"),
+  read_env_monthly(file.path(cleaned_dir, "DUML_DO_Cleaned.xlsx"), "DUML", "DO"),
+  read_env_monthly(file.path(cleaned_dir, "DUML_pH_Cleaned.xlsx"), "DUML", "pH")
+)
+
+env_wide <- env_monthly %>%
+  select(station, month, variable, mean_value) %>%
+  pivot_wider(
+    names_from = variable,
+    values_from = mean_value
+  )
+
+env_wide
+```
+
+```{r}
+station_map <- data.frame(
+  location = c("DAF", "CMT"),
+  station = c("DUML", "CMAST")  
+)
+```
+
+```{r}
+environmental_traits_by_sample <- samples %>%
+  left_join(station_map, by = "location") %>%
+  left_join(env_wide, by = c("station", "month"))
+
+environmental_traits_by_sample
+
+write.csv(
+  environmental_traits_by_sample,
+  "environmental_traits_by_sample.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+dim(environmental_traits_by_sample)
+head(environmental_traits_by_sample)
+
+list.files(pattern = "environmental_traits_by_sample.csv")
+```
+
+```{r}
+head(rownames(datExpr))
+head(rownames(traitData))
+
+setdiff(rownames(datExpr), rownames(traitData))
+setdiff(rownames(traitData), rownames(datExpr))
+```
+
+```{r}
+# Save original names just in case
+original_datExpr_names <- rownames(datExpr)
+
+# Remove sequencing suffix like _S191_L005
+rownames(datExpr) <- gsub("_S[0-9]+_L[0-9]+$", "", rownames(datExpr))
+
+# Check names now
+head(rownames(datExpr))
+head(rownames(traitData))
+```
+
+```{r}
+traitData_numeric <- traitData[, c("conductivity", "DO", "pH", "precip")]
+
+traitData_numeric <- traitData_numeric[rownames(datExpr), ]
+
+all(rownames(traitData_numeric) == rownames(datExpr))
+```
+
+```{r}
+colSums(is.na(traitData_numeric))
+```
+
+```{r}
+moduleTraitCor <- cor(MEs, traitData_numeric, use = "pairwise.complete.obs")
+```
+
+```{r}
+# If MEs already exists, check it
+dim(MEs)
+head(rownames(MEs))
+colnames(MEs)
+```
+
+```{r}
+rownames(MEs) <- gsub("_S[0-9]+_L[0-9]+$", "", rownames(MEs))
+```
+
+```{r}
+traitData_numeric <- traitData_numeric[rownames(MEs), ]
+
+all(rownames(traitData_numeric) == rownames(MEs))
+```
+
+```{r}
+colSums(is.na(traitData_numeric))
+```
+
+```{r}
+library(WGCNA)
+
+nSamples <- nrow(MEs)
+
+moduleTraitCor <- cor(
+  MEs,
+  traitData_numeric,
+  use = "pairwise.complete.obs"
+)
+
+moduleTraitPvalue <- corPvalueStudent(
+  moduleTraitCor,
+  nSamples = nSamples
+)
+```
+
+```{r}
+textMatrix <- paste(
+  signif(moduleTraitCor, 2),
+  "\n(",
+  signif(moduleTraitPvalue, 2),
+  ")",
+  sep = ""
+)
+
+dim(textMatrix) <- dim(moduleTraitCor)
+```
+
+```{r}
+pdf("WGCNA_environment_module_trait_heatmap.pdf", width = 11, height = 8)
+
+labeledHeatmap(
+  Matrix = moduleTraitCor,
+  xLabels = names(traitData_numeric),
+  yLabels = names(MEs),
+  ySymbols = names(MEs),
+  colorLabels = FALSE,
+  colors = blueWhiteRed(50),
+  textMatrix = textMatrix,
+  setStdMargins = FALSE,
+  cex.text = 0.8,
+  zlim = c(-1, 1),
+  main = "Module-trait relationships with environmental variables"
+)
+
+```
+
+```{r}
+list.files(pattern = "WGCNA_environment")
+```
+
+```{r}
+write.csv(
+  moduleTraitCor,
+  "WGCNA_environment_module_trait_correlations.csv"
+)
+
+write.csv(
+  moduleTraitPvalue,
+  "WGCNA_environment_module_trait_pvalues.csv"
+)
+```
+
+```{r}
+module_trait_results <- as.data.frame(as.table(moduleTraitCor))
+colnames(module_trait_results) <- c("module", "trait", "correlation")
+
+module_trait_pvals <- as.data.frame(as.table(moduleTraitPvalue))
+colnames(module_trait_pvals) <- c("module", "trait", "pvalue")
+
+module_trait_results <- module_trait_results %>%
+  left_join(module_trait_pvals, by = c("module", "trait")) %>%
+  arrange(pvalue)
+
+write.csv(
+  module_trait_results,
+  "WGCNA_environment_module_trait_results_long.csv",
+  row.names = FALSE
+)
+
+head(module_trait_results)
+```
+
+```{r}
+library(WGCNA)
+library(dplyr)
+
+# 1. Add categorical traits
+
+traitData_full <- traitData
+
+traitData_full$location_DAF <- ifelse(traitData_full$location == "DAF", 1, 0)
+traitData_full$location_CMT <- ifelse(traitData_full$location == "CMT", 1, 0)
+
+traitData_full$month_Jun <- ifelse(traitData_full$month == "Jun", 1, 0)
+traitData_full$month_Jul <- ifelse(traitData_full$month == "Jul", 1, 0)
+traitData_full$month_Aug <- ifelse(traitData_full$month == "Aug", 1, 0)
+
+traitData_full$oyster_SJ1 <- ifelse(traitData_full$oyster == "SJ1", 1, 0)
+traitData_full$oyster_SJ2 <- ifelse(traitData_full$oyster == "SJ2", 1, 0)
+traitData_full$oyster_SJ3 <- ifelse(traitData_full$oyster == "SJ3", 1, 0)
+
+# 2. Select environmental + metadata traits
+
+traitData_big <- traitData_full[, c(
+  "conductivity",
+  "DO",
+  "pH",
+  "precip",
+  "location_DAF",
+  "location_CMT",
+  "month_Jun",
+  "month_Jul",
+  "month_Aug",
+  "oyster_SJ1",
+  "oyster_SJ2",
+  "oyster_SJ3"
+)]
+
+# Make sure rownames match MEs
+traitData_big <- traitData_big[rownames(MEs), ]
+
+all(rownames(traitData_big) == rownames(MEs))
+```
+
+```{r}
+
+# 3. Module-trait correlations
+
+nSamples <- nrow(MEs)
+
+moduleTraitCor_big <- cor(
+  MEs,
+  traitData_big,
+  use = "pairwise.complete.obs"
+)
+
+moduleTraitPvalue_big <- corPvalueStudent(
+  moduleTraitCor_big,
+  nSamples = nSamples
+)
+
+textMatrix_big <- paste(
+  signif(moduleTraitCor_big, 2),
+  "\n(",
+  signif(moduleTraitPvalue_big, 2),
+  ")",
+  sep = ""
+)
+
+dim(textMatrix_big) <- dim(moduleTraitCor_big)
+```
+
+```{r}
+
+# 4. Big heatmap
+
+
+pdf("WGCNA_big_module_trait_heatmap_env_location_month.pdf", width = 16, height = 9)
+
+labeledHeatmap(
+  Matrix = moduleTraitCor_big,
+  xLabels = names(traitData_big),
+  yLabels = names(MEs),
+  ySymbols = names(MEs),
+  colorLabels = FALSE,
+  colors = blueWhiteRed(50),
+  textMatrix = textMatrix_big,
+  setStdMargins = FALSE,
+  cex.text = 0.65,
+  cex.lab.x = 0.9,
+  cex.lab.y = 0.9,
+  zlim = c(-1, 1),
+  main = "Module-trait relationships: environmental, location, month, and oyster traits"
+)
+
+dev.off()
+```
+
+```{r}
+write.csv(
+  moduleTraitCor_big,
+  "WGCNA_big_module_trait_correlations.csv"
+)
+
+write.csv(
+  moduleTraitPvalue_big,
+  "WGCNA_big_module_trait_pvalues.csv"
+)
+
+module_trait_results_big <- as.data.frame(as.table(moduleTraitCor_big))
+colnames(module_trait_results_big) <- c("module", "trait", "correlation")
+
+module_trait_pvals_big <- as.data.frame(as.table(moduleTraitPvalue_big))
+colnames(module_trait_pvals_big) <- c("module", "trait", "pvalue")
+
+module_trait_results_big <- module_trait_results_big %>%
+  left_join(module_trait_pvals_big, by = c("module", "trait")) %>%
+  arrange(pvalue)
+
+write.csv(
+  module_trait_results_big,
+  "WGCNA_big_module_trait_results_long.csv",
+  row.names = FALSE
+)
+
+head(module_trait_results_big, 20)
+```
+
+Several gene modules are significantly associated with environmental traits, especially dissolved oxygen and precipitation. MEblue shows the strongest environmental signal, with a strong positive correlation with DO and negative correlation with precipitation, while also being associated with location. Brown and green modules are positively associated with precipitation, and green also shows a conductivity association. These patterns suggest that environmental variation may explain some of the site/month expression structure, but location and environmental variables may be confounded and should be interpreted carefully.
+
+EXTRACTING GENES from Modules and GO SEQ
+
+```{r}
+library(WGCNA)
+
+moduleColors <- labels2colors(net$colors)
+
+length(moduleColors)
+table(moduleColors)
+head(moduleColors)
+```
+
+```{r}
+names(moduleColors) <- colnames(datExpr)
+
+head(names(moduleColors))
+head(moduleColors)
+```
+
+```{r}
+blue_genes <- names(moduleColors)[moduleColors == "blue"]
+brown_genes <- names(moduleColors)[moduleColors == "brown"]
+green_genes <- names(moduleColors)[moduleColors == "green"]
+
+length(blue_genes)
+length(brown_genes)
+length(green_genes)
+
+head(blue_genes)
 ```

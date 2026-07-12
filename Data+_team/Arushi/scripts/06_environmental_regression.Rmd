@@ -1,0 +1,2712 @@
+---
+title: "RNA Sequencing - Oysters"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+  pdf_document: default
+---
+
+**00 - File Check**
+
+```{r}
+# ============================================================
+# Environmental Regression Analysis
+# Oyster RNA-seq Project
+#
+# Purpose:
+# Test whether environmental conditions are associated with
+# WGCNA module eigengenes and selected gene-expression patterns.
+#
+# Analysis order:
+# 1. Prepare sample-level environmental data
+# 2. Explore environmental variables
+# 3. Run module-level linear regressions
+# 4. Identify the strongest module-environment associations
+# 5. Examine selected genes using VST-normalized expression
+# ============================================================
+
+
+# Check the current project folder
+getwd()
+
+# View the files available in the current folder
+list.files()
+```
+
+**01 - Environmental Data Matrix**
+
+```{r}
+
+#Define seven day window as
+  # collection date minus 6 days through collection date
+
+# ============================================================
+# 2. Inspect environmental source files
+# ============================================================
+
+library(readxl)
+library(dplyr)
+library(lubridate)
+library(tidyr)
+library(stringr)
+library(purrr)
+
+# The Cleaned folder is at the root of the GitHub repository
+cleaned_dir <- file.path("..", "..", "..", "Cleaned")
+
+# Check that R can find the folder
+dir.exists(cleaned_dir)
+```
+
+```{r}
+
+# Environmental files expected for the 2024 RNA-seq samples
+environmental_files <- c(
+  salinity = "Salinity_2024.xlsx",
+  dissolved_oxygen = "DOsensor_2024.xlsx",
+  precipitation = "Precipdaily_2024.xlsx",
+  pH = "pH_2024.xlsx"
+)
+
+# Construct full file paths
+environmental_paths <- file.path(
+  cleaned_dir,
+  unname(environmental_files)
+)
+
+# Confirm that every file exists
+file_check <- data.frame(
+  dataset = names(environmental_files),
+  filename = unname(environmental_files),
+  exists = file.exists(environmental_paths)
+)
+
+file_check
+```
+
+```{r}
+all(file_check$exists)
+```
+
+```{r}
+# ============================================================
+# 2B. Inspect sample metadata and workbook structures
+# ============================================================
+
+# Load the existing sample-level table.
+# We are using this for sample IDs and collection information,
+# not trusting its environmental summaries yet.
+existing_sample_table <- read.csv(
+  "environmental_traits_by_sample.csv",
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+# Number of rows and columns
+dim(existing_sample_table)
+
+# Exact column names
+names(existing_sample_table)
+
+# First six samples
+head(existing_sample_table, 6)
+```
+
+```{r}
+# Give the paths names again so the output is easy to interpret
+names(environmental_paths) <- names(environmental_files)
+
+workbook_sheets <- lapply(
+  environmental_paths,
+  readxl::excel_sheets
+)
+
+workbook_sheets
+```
+
+```{r}
+workbook_previews <- lapply(
+  environmental_paths,
+  function(path) {
+    first_sheet <- readxl::excel_sheets(path)[1]
+
+    readxl::read_excel(
+      path,
+      sheet = first_sheet,
+      n_max = 5
+    )
+  }
+)
+
+workbook_previews
+
+```
+
+```{r}
+# ============================================================
+# 2C. Correct the sample-to-station mapping
+# ============================================================
+
+sample_metadata <- existing_sample_table %>%
+  transmute(
+    sample_id,
+    location,
+    month,
+    oyster,
+    date_collected = as.Date(date_collected),
+
+    # Correct station mapping
+    station = case_when(
+      location == "CMT" ~ "CMAST",
+      location == "DAF" ~ "DUML",
+      TRUE ~ NA_character_
+    )
+  )
+
+sample_metadata
+```
+
+```{r}
+
+#Mapping check and recreating the collection events
+
+sample_metadata %>%
+  distinct(location, station)
+
+stopifnot(
+  all(sample_metadata$location == "CMT" |
+        sample_metadata$location == "DAF"),
+  all(!is.na(sample_metadata$station))
+)
+
+collection_events <- sample_metadata %>%
+  distinct(
+    location,
+    station,
+    date_collected,
+    month
+  ) %>%
+  arrange(date_collected)
+
+collection_events
+```
+
+```{r}
+# ============================================================
+# 2D. Load raw environmental data and create daily summaries
+# ============================================================
+
+# Safely calculate a mean without producing NaN
+safe_mean <- function(x) {
+  if (all(is.na(x))) {
+    return(NA_real_)
+  }
+
+  mean(x, na.rm = TRUE)
+}
+
+# Safely calculate a sum without turning an entirely missing day into zero
+safe_sum <- function(x) {
+  if (all(is.na(x))) {
+    return(NA_real_)
+  }
+
+  sum(x, na.rm = TRUE)
+}
+
+# Handles DateTime columns whether readxl imports them as
+# text or as an existing date-time object
+parse_environment_datetime <- function(x) {
+
+  if (inherits(x, "POSIXt")) {
+    return(lubridate::with_tz(x, "America/New_York"))
+  }
+
+  lubridate::ymd_hms(
+    as.character(x),
+    tz = "America/New_York",
+    quiet = TRUE
+  )
+}
+```
+
+```{r}
+# Temperature, conductivity, and salinity
+salinity_raw <- readxl::read_excel(
+  environmental_paths["salinity"],
+  sheet = "Sheet1"
+) %>%
+  mutate(
+    DateTime = parse_environment_datetime(DateTime),
+    date = as.Date(DateTime),
+    Farm = stringr::str_to_upper(stringr::str_trim(Farm))
+  )
+
+# Dissolved oxygen
+do_raw <- readxl::read_excel(
+  environmental_paths["dissolved_oxygen"],
+  sheet = "DOUpdated"
+) %>%
+  mutate(
+    DateTime = parse_environment_datetime(DateTime),
+    date = as.Date(DateTime),
+    Farm = stringr::str_to_upper(stringr::str_trim(Farm))
+  )
+
+# Precipitation
+precip_raw <- readxl::read_excel(
+  environmental_paths["precipitation"],
+  sheet = "Sheet1"
+) %>%
+  mutate(
+    DateTime = parse_environment_datetime(DateTime),
+    date = as.Date(DateTime)
+  )
+
+# pH
+ph_raw <- readxl::read_excel(
+  environmental_paths["pH"],
+  sheet = "pHUpdated"
+) %>%
+  mutate(
+    DateTime = parse_environment_datetime(DateTime),
+    date = as.Date(DateTime),
+    Farm = stringr::str_to_upper(stringr::str_trim(Farm))
+  )
+```
+
+```{r}
+datetime_check <- tibble::tibble(
+  dataset = c(
+    "salinity",
+    "dissolved_oxygen",
+    "precipitation",
+    "pH"
+  ),
+  total_rows = c(
+    nrow(salinity_raw),
+    nrow(do_raw),
+    nrow(precip_raw),
+    nrow(ph_raw)
+  ),
+  missing_datetime = c(
+    sum(is.na(salinity_raw$DateTime)),
+    sum(is.na(do_raw$DateTime)),
+    sum(is.na(precip_raw$DateTime)),
+    sum(is.na(ph_raw$DateTime))
+  )
+)
+
+datetime_check
+```
+
+```{r}
+# Reload DO data while preserving the original DateTime values
+do_datetime_check <- readxl::read_excel(
+  environmental_paths["dissolved_oxygen"],
+  sheet = "DOUpdated"
+) %>%
+  mutate(
+    source_row = dplyr::row_number(),
+    DateTime_original = as.character(DateTime),
+    DateTime_parsed = parse_environment_datetime(DateTime)
+  )
+
+# Display every row whose timestamp could not be parsed
+do_datetime_problems <- do_datetime_check %>%
+  filter(is.na(DateTime_parsed))
+
+print(
+  do_datetime_problems,
+  n = Inf,
+  width = Inf
+)
+```
+
+```{r}
+do_datetime_problems %>%
+  summarise(
+    problem_rows = n(),
+    rows_with_DO_values = sum(!is.na(DomgL)),
+    rows_with_farm_values = sum(!is.na(Farm)),
+    rows_with_temperature_values = sum(!is.na(Temp_C))
+  )
+```
+
+```{r}
+# Remove four empty spreadsheet artifact rows
+do_raw <- do_raw %>%
+  filter(!is.na(DateTime))
+```
+
+```{r}
+# Four rows with invalid Excel placeholder dates and no measurements
+# were removed before daily aggregation.
+
+nrow(do_raw)
+sum(is.na(do_raw$DateTime))
+```
+
+```{r}
+do_daily <- do_raw %>%
+  filter(Farm %in% c("CMAST", "DUML")) %>%
+  group_by(Farm, date) %>%
+  summarise(
+    DO_daily_mean = safe_mean(DomgL),
+    DO_observations = sum(!is.na(DomgL)),
+    .groups = "drop"
+  )
+```
+
+```{r}
+# ============================================================
+# 2E. Create daily environmental summaries
+# ============================================================
+
+# Temperature, conductivity, and salinity
+salinity_daily <- salinity_raw %>%
+  filter(
+    Farm %in% c("CMAST", "DUML"),
+    !is.na(date)
+  ) %>%
+  group_by(Farm, date) %>%
+  summarise(
+    temperature_daily_mean = safe_mean(Temp_C),
+    conductivity_daily_mean = safe_mean(ConduScm),
+    salinity_daily_mean = safe_mean(Sal_ppt),
+
+    temperature_observations = sum(!is.na(Temp_C)),
+    conductivity_observations = sum(!is.na(ConduScm)),
+    salinity_observations = sum(!is.na(Sal_ppt)),
+
+    .groups = "drop"
+  ) %>%
+  arrange(Farm, date)
+
+
+# Dissolved oxygen
+do_daily <- do_raw %>%
+  filter(
+    Farm %in% c("CMAST", "DUML"),
+    !is.na(date)
+  ) %>%
+  group_by(Farm, date) %>%
+  summarise(
+    DO_daily_mean = safe_mean(DomgL),
+    DO_observations = sum(!is.na(DomgL)),
+    .groups = "drop"
+  ) %>%
+  arrange(Farm, date)
+
+
+# pH
+ph_daily <- ph_raw %>%
+  filter(
+    Farm %in% c("CMAST", "DUML"),
+    !is.na(date)
+  ) %>%
+  group_by(Farm, date) %>%
+  summarise(
+    pH_daily_mean = safe_mean(pH),
+    pH_observations = sum(!is.na(pH)),
+    .groups = "drop"
+  ) %>%
+  arrange(Farm, date)
+
+
+# Precipitation is already daily.
+# Summing protects us in case a date appears more than once.
+precip_daily <- precip_raw %>%
+  filter(!is.na(date)) %>%
+  group_by(date) %>%
+  summarise(
+    precipitation_daily_mm = safe_sum(Precip_mm),
+    precipitation_observations = sum(!is.na(Precip_mm)),
+    .groups = "drop"
+  ) %>%
+  arrange(date)
+```
+
+```{r}
+daily_summary_check <- tibble::tibble(
+  dataset = c(
+    "temperature_salinity_conductivity",
+    "dissolved_oxygen",
+    "pH",
+    "precipitation"
+  ),
+  rows = c(
+    nrow(salinity_daily),
+    nrow(do_daily),
+    nrow(ph_daily),
+    nrow(precip_daily)
+  ),
+  missing_summary_values = c(
+    sum(
+      is.na(salinity_daily$temperature_daily_mean) |
+      is.na(salinity_daily$conductivity_daily_mean) |
+      is.na(salinity_daily$salinity_daily_mean)
+    ),
+    sum(is.na(do_daily$DO_daily_mean)),
+    sum(is.na(ph_daily$pH_daily_mean)),
+    sum(is.na(precip_daily$precipitation_daily_mm))
+  )
+)
+
+daily_summary_check
+```
+
+```{r}
+salinity_daily %>%
+  group_by(Farm) %>%
+  summarise(
+    first_date = min(date),
+    last_date = max(date),
+    days_available = n_distinct(date),
+    .groups = "drop"
+  )
+
+do_daily %>%
+  group_by(Farm) %>%
+  summarise(
+    first_date = min(date),
+    last_date = max(date),
+    days_available = n_distinct(date),
+    .groups = "drop"
+  )
+
+ph_daily %>%
+  group_by(Farm) %>%
+  summarise(
+    first_date = min(date),
+    last_date = max(date),
+    days_available = n_distinct(date),
+    .groups = "drop"
+  )
+
+precip_daily %>%
+  summarise(
+    first_date = min(date),
+    last_date = max(date),
+    days_available = n_distinct(date)
+  )
+```
+
+```{r}
+# ============================================================
+# 2F. Check environmental coverage for each 7-day window
+# ============================================================
+
+# Create one row for every required calendar day
+# Collection day and the six preceding days = 7 total days
+event_windows <- collection_events %>%
+  mutate(
+    window_start = date_collected - lubridate::days(6),
+    window_end = date_collected
+  ) %>%
+  rowwise() %>%
+  mutate(
+    date = list(
+      seq(
+        from = window_start,
+        to = window_end,
+        by = "day"
+      )
+    )
+  ) %>%
+  ungroup() %>%
+  tidyr::unnest(date)
+
+event_windows
+```
+
+```{r}
+dim(event_windows)
+```
+
+```{r}
+# Rename Farm to station before joining
+salinity_daily_join <- salinity_daily %>%
+  rename(station = Farm)
+
+do_daily_join <- do_daily %>%
+  rename(station = Farm)
+
+ph_daily_join <- ph_daily %>%
+  rename(station = Farm)
+
+# Join each required date to its environmental measurements
+event_window_data <- event_windows %>%
+  left_join(
+    salinity_daily_join,
+    by = c("station", "date")
+  ) %>%
+  left_join(
+    do_daily_join,
+    by = c("station", "date")
+  ) %>%
+  left_join(
+    ph_daily_join,
+    by = c("station", "date")
+  ) %>%
+  left_join(
+    precip_daily,
+    by = "date"
+  )
+
+event_window_data
+```
+
+```{r}
+seven_day_coverage <- event_window_data %>%
+  group_by(
+    location,
+    station,
+    month,
+    date_collected,
+    window_start,
+    window_end
+  ) %>%
+  summarise(
+    expected_days = n_distinct(date),
+
+    temperature_days =
+      sum(!is.na(temperature_daily_mean)),
+
+    conductivity_days =
+      sum(!is.na(conductivity_daily_mean)),
+
+    salinity_days =
+      sum(!is.na(salinity_daily_mean)),
+
+    DO_days =
+      sum(!is.na(DO_daily_mean)),
+
+    pH_days =
+      sum(!is.na(pH_daily_mean)),
+
+    precipitation_days =
+      sum(!is.na(precipitation_daily_mm)),
+
+    .groups = "drop"
+  )
+
+seven_day_coverage
+```
+
+```{r}
+missing_window_values <- event_window_data %>%
+  select(
+    location,
+    station,
+    month,
+    date_collected,
+    date,
+    temperature_daily_mean,
+    conductivity_daily_mean,
+    salinity_daily_mean,
+    DO_daily_mean,
+    pH_daily_mean,
+    precipitation_daily_mm
+  ) %>%
+  pivot_longer(
+    cols = c(
+      temperature_daily_mean,
+      conductivity_daily_mean,
+      salinity_daily_mean,
+      DO_daily_mean,
+      pH_daily_mean,
+      precipitation_daily_mm
+    ),
+    names_to = "environmental_variable",
+    values_to = "value"
+  ) %>%
+  filter(is.na(value)) %>%
+  select(
+    location,
+    station,
+    month,
+    date_collected,
+    missing_date = date,
+    environmental_variable
+  ) %>%
+  arrange(
+    date_collected,
+    environmental_variable,
+    missing_date
+  )
+
+print(
+  missing_window_values,
+  n = Inf
+)
+```
+
+```{r}
+# ============================================================
+# 2G. Investigate missing environmental dates
+# ============================================================
+
+salinity_missing_dates <- missing_window_values %>%
+  filter(environmental_variable == "salinity_daily_mean") %>%
+  distinct(missing_date) %>%
+  pull(missing_date)
+
+salinity_gap_check <- salinity_raw %>%
+  filter(date %in% salinity_missing_dates) %>%
+  count(
+    date,
+    Farm,
+    Location,
+    name = "raw_rows"
+  ) %>%
+  arrange(date, Farm, Location)
+
+print(
+  salinity_gap_check,
+  n = Inf
+)
+```
+
+```{r}
+ph_missing_dates <- missing_window_values %>%
+  filter(environmental_variable == "pH_daily_mean") %>%
+  distinct(missing_date) %>%
+  pull(missing_date)
+
+ph_gap_check <- ph_raw %>%
+  filter(date %in% ph_missing_dates) %>%
+  count(
+    date,
+    Farm,
+    Location,
+    name = "raw_rows"
+  ) %>%
+  arrange(date, Farm, Location)
+
+print(
+  ph_gap_check,
+  n = Inf
+)
+```
+
+```{r}
+# Create daily temperature from the dissolved-oxygen sensor
+do_temperature_daily <- do_raw %>%
+  filter(
+    Farm %in% c("CMAST", "DUML"),
+    !is.na(date)
+  ) %>%
+  group_by(Farm, date) %>%
+  summarise(
+    temperature_DO_daily_mean = safe_mean(Temp_C),
+    temperature_DO_observations = sum(!is.na(Temp_C)),
+    .groups = "drop"
+  ) %>%
+  rename(station = Farm)
+```
+
+```{r}
+do_temperature_coverage <- event_windows %>%
+  left_join(
+    do_temperature_daily,
+    by = c("station", "date")
+  ) %>%
+  group_by(
+    location,
+    station,
+    month,
+    date_collected
+  ) %>%
+  summarise(
+    expected_days = n_distinct(date),
+    temperature_DO_days =
+      sum(!is.na(temperature_DO_daily_mean)),
+    .groups = "drop"
+  ) %>%
+  arrange(date_collected)
+
+do_temperature_coverage
+```
+
+```{r}
+# Install only if zoo is not already available
+#if (!requireNamespace("zoo", quietly = TRUE)) {
+#  install.packages("zoo")
+#}
+
+#library(zoo)
+```
+
+```{r}
+# ============================================================
+# 2H. Interpolate short salinity and conductivity gaps
+# ============================================================
+
+salinity_daily_interpolated <- salinity_daily %>%
+  group_by(Farm) %>%
+  tidyr::complete(
+    date = seq(
+      min(date, na.rm = TRUE),
+      max(date, na.rm = TRUE),
+      by = "day"
+    )
+  ) %>%
+  arrange(Farm, date) %>%
+  mutate(
+    # Record whether the original daily measurement existed
+    salinity_observed = !is.na(salinity_daily_mean),
+    conductivity_observed = !is.na(conductivity_daily_mean),
+
+    # Interpolate only internal gaps of four days or fewer
+    salinity_daily_filled = zoo::na.approx(
+      salinity_daily_mean,
+      x = as.numeric(date),
+      maxgap = 4,
+      na.rm = FALSE
+    ),
+
+    conductivity_daily_filled = zoo::na.approx(
+      conductivity_daily_mean,
+      x = as.numeric(date),
+      maxgap = 4,
+      na.rm = FALSE
+    ),
+
+    # Flag values generated by interpolation
+    salinity_imputed =
+      is.na(salinity_daily_mean) &
+      !is.na(salinity_daily_filled),
+
+    conductivity_imputed =
+      is.na(conductivity_daily_mean) &
+      !is.na(conductivity_daily_filled)
+  ) %>%
+  ungroup()
+```
+
+```{r}
+# Interpolate only pH gaps of two consecutive days or fewer
+ph_daily_interpolated <- ph_daily %>%
+  group_by(Farm) %>%
+  tidyr::complete(
+    date = seq(
+      min(date, na.rm = TRUE),
+      max(date, na.rm = TRUE),
+      by = "day"
+    )
+  ) %>%
+  arrange(Farm, date) %>%
+  mutate(
+    pH_observed = !is.na(pH_daily_mean),
+
+    pH_daily_filled = zoo::na.approx(
+      pH_daily_mean,
+      x = as.numeric(date),
+      maxgap = 2,
+      na.rm = FALSE
+    ),
+
+    pH_imputed =
+      is.na(pH_daily_mean) &
+      !is.na(pH_daily_filled)
+  ) %>%
+  ungroup()
+```
+
+```{r}
+salinity_values_imputed <- salinity_daily_interpolated %>%
+  filter(salinity_imputed | conductivity_imputed) %>%
+  select(
+    Farm,
+    date,
+    salinity_daily_mean,
+    salinity_daily_filled,
+    salinity_imputed,
+    conductivity_daily_mean,
+    conductivity_daily_filled,
+    conductivity_imputed
+  ) %>%
+  arrange(Farm, date)
+
+ph_values_imputed <- ph_daily_interpolated %>%
+  filter(pH_imputed) %>%
+  select(
+    Farm,
+    date,
+    pH_daily_mean,
+    pH_daily_filled,
+    pH_imputed
+  ) %>%
+  arrange(Farm, date)
+
+print(salinity_values_imputed, n = Inf)
+print(ph_values_imputed, n = Inf)
+```
+
+```{r}
+tibble::tibble(
+  variable = c("salinity", "conductivity", "pH"),
+  values_imputed = c(
+    sum(salinity_daily_interpolated$salinity_imputed),
+    sum(salinity_daily_interpolated$conductivity_imputed),
+    sum(ph_daily_interpolated$pH_imputed)
+  ),
+  values_still_missing = c(
+    sum(is.na(salinity_daily_interpolated$salinity_daily_filled)),
+    sum(is.na(salinity_daily_interpolated$conductivity_daily_filled)),
+    sum(is.na(ph_daily_interpolated$pH_daily_filled))
+  )
+)
+```
+
+```{r}
+# NOTE FOR MARINE LAB TEAM:
+# Sensor gaps were identified before 7-day exposure calculation.
+# Salinity and conductivity gaps of <= 4 consecutive days were
+# linearly interpolated within station.
+# pH gaps of <= 2 consecutive days were interpolated.
+# The complete CMAST pH gap for 2024-08-13 through 2024-08-19
+# was not imputed and requires confirmation or backup data.
+```
+
+Do we have backup or uncleaned sensor files for DUML on June 15–17, both farms around July 20–23, and CMAST pH for August 13–19? Were the sensors removed or moved during those periods?
+
+```{r}
+# ============================================================
+# 2I. Recheck target windows after short-gap interpolation
+# ============================================================
+
+# Prepare interpolated salinity and conductivity data
+salinity_filled_join <- salinity_daily_interpolated %>%
+  transmute(
+    station = Farm,
+    date,
+
+    salinity_daily_value = salinity_daily_filled,
+    conductivity_daily_value = conductivity_daily_filled,
+
+    salinity_was_imputed = salinity_imputed,
+    conductivity_was_imputed = conductivity_imputed
+  )
+
+
+# Prepare interpolated pH data
+ph_filled_join <- ph_daily_interpolated %>%
+  transmute(
+    station = Farm,
+    date,
+
+    pH_daily_value = pH_daily_filled,
+    pH_was_imputed = pH_imputed
+  )
+
+
+# Temperature from the DO sensor has complete coverage
+temperature_filled_join <- do_temperature_daily %>%
+  transmute(
+    station,
+    date,
+    temperature_daily_value = temperature_DO_daily_mean
+  )
+
+
+# Prepare DO data
+do_filled_join <- do_daily %>%
+  transmute(
+    station = Farm,
+    date,
+    DO_daily_value = DO_daily_mean
+  )
+```
+
+```{r}
+event_window_final_check <- event_windows %>%
+  left_join(
+    salinity_filled_join,
+    by = c("station", "date")
+  ) %>%
+  left_join(
+    ph_filled_join,
+    by = c("station", "date")
+  ) %>%
+  left_join(
+    temperature_filled_join,
+    by = c("station", "date")
+  ) %>%
+  left_join(
+    do_filled_join,
+    by = c("station", "date")
+  ) %>%
+  left_join(
+    precip_daily %>%
+      transmute(
+        date,
+        precipitation_daily_value =
+          precipitation_daily_mm
+      ),
+    by = "date"
+  )
+```
+
+```{r}
+final_window_coverage <- event_window_final_check %>%
+  group_by(
+    location,
+    station,
+    month,
+    date_collected
+  ) %>%
+  summarise(
+    expected_days = n_distinct(date),
+
+    temperature_days =
+      sum(!is.na(temperature_daily_value)),
+
+    salinity_days =
+      sum(!is.na(salinity_daily_value)),
+
+    conductivity_days =
+      sum(!is.na(conductivity_daily_value)),
+
+    DO_days =
+      sum(!is.na(DO_daily_value)),
+
+    pH_days =
+      sum(!is.na(pH_daily_value)),
+
+    precipitation_days =
+      sum(!is.na(precipitation_daily_value)),
+
+    salinity_days_imputed =
+      sum(salinity_was_imputed %in% TRUE),
+
+    conductivity_days_imputed =
+      sum(conductivity_was_imputed %in% TRUE),
+
+    pH_days_imputed =
+      sum(pH_was_imputed %in% TRUE),
+
+    .groups = "drop"
+  ) %>%
+  arrange(date_collected)
+
+final_window_coverage
+```
+
+```{r}
+# ============================================================
+# 2J. Create coverage-aware environmental summaries
+# ============================================================
+
+environmental_events_7d <- event_window_final_check %>%
+  group_by(
+    location,
+    station,
+    month,
+    date_collected
+  ) %>%
+  summarise(
+    window_start = min(date),
+    window_end = max(date),
+    expected_days = n_distinct(date),
+
+    # Complete temperature source: temperature from DO sensor
+    temperature_7d_mean =
+      safe_mean(temperature_daily_value),
+
+    temperature_days_used =
+      sum(!is.na(temperature_daily_value)),
+
+    # Salinity: mean of available days in the intended 7-day window
+    salinity_7d_available_mean =
+      safe_mean(salinity_daily_value),
+
+    salinity_days_used =
+      sum(!is.na(salinity_daily_value)),
+
+    # Conductivity: mean of available days in the intended window
+    conductivity_7d_available_mean =
+      safe_mean(conductivity_daily_value),
+
+    conductivity_days_used =
+      sum(!is.na(conductivity_daily_value)),
+
+    # Dissolved oxygen
+    DO_7d_mean =
+      safe_mean(DO_daily_value),
+
+    DO_days_used =
+      sum(!is.na(DO_daily_value)),
+
+    # pH: will remain NA when all seven days are unavailable
+    pH_7d_available_mean =
+      safe_mean(pH_daily_value),
+
+    pH_days_used =
+      sum(!is.na(pH_daily_value)),
+
+    # Precipitation should be accumulated across the seven days
+    precipitation_7d_total_mm =
+      safe_sum(precipitation_daily_value),
+
+    precipitation_days_used =
+      sum(!is.na(precipitation_daily_value)),
+
+    .groups = "drop"
+  ) %>%
+
+  # Add explicit coverage measures
+  mutate(
+    temperature_coverage =
+      temperature_days_used / expected_days,
+
+    salinity_coverage =
+      salinity_days_used / expected_days,
+
+    conductivity_coverage =
+      conductivity_days_used / expected_days,
+
+    DO_coverage =
+      DO_days_used / expected_days,
+
+    pH_coverage =
+      pH_days_used / expected_days,
+
+    precipitation_coverage =
+      precipitation_days_used / expected_days,
+
+    salinity_partial =
+      salinity_days_used < expected_days,
+
+    conductivity_partial =
+      conductivity_days_used < expected_days,
+
+    pH_partial =
+      pH_days_used < expected_days
+  ) %>%
+  arrange(date_collected)
+
+environmental_events_7d
+```
+
+```{r}
+environmental_events_7d %>%
+  select(
+    location,
+    station,
+    month,
+    date_collected,
+
+    temperature_7d_mean,
+
+    salinity_7d_available_mean,
+    salinity_days_used,
+    salinity_coverage,
+
+    conductivity_7d_available_mean,
+    conductivity_days_used,
+    conductivity_coverage,
+
+    DO_7d_mean,
+
+    pH_7d_available_mean,
+    pH_days_used,
+    pH_coverage,
+
+    precipitation_7d_total_mm
+  )
+```
+
+```{r}
+# We should have exactly six unique environmental events
+stopifnot(nrow(environmental_events_7d) == 6)
+
+# These three variables should have complete coverage
+stopifnot(
+  all(environmental_events_7d$temperature_days_used == 7),
+  all(environmental_events_7d$DO_days_used == 7),
+  all(environmental_events_7d$precipitation_days_used == 7)
+)
+
+# Exactly one event should currently have no pH measurements
+sum(environmental_events_7d$pH_days_used == 0)
+
+# Show that event
+environmental_events_7d %>%
+  filter(pH_days_used == 0) %>%
+  select(
+    location,
+    station,
+    month,
+    date_collected,
+    pH_days_used,
+    pH_7d_available_mean
+  )
+```
+
+```{r}
+# ============================================================
+# 2K. Create and save validated environmental matrices
+# ============================================================
+
+environmental_events_model <- environmental_events_7d %>%
+  mutate(
+    event_id = paste(
+      location,
+      format(date_collected, "%Y%m%d"),
+      sep = "_"
+    ),
+
+    site_name = case_when(
+      location == "DAF" ~ "Duke Aqua Farm",
+      location == "CMT" ~ "CMAST / NC State",
+      TRUE ~ NA_character_
+    ),
+
+    # Human-readable data-quality labels
+    salinity_quality = case_when(
+      salinity_days_used == 7 ~ "complete_7_of_7",
+      salinity_days_used >= 4 ~ "partial_at_least_half",
+      TRUE ~ "partial_under_half"
+    ),
+
+    conductivity_quality = case_when(
+      conductivity_days_used == 7 ~ "complete_7_of_7",
+      conductivity_days_used >= 4 ~ "partial_at_least_half",
+      TRUE ~ "partial_under_half"
+    ),
+
+    pH_quality = case_when(
+      pH_days_used == 7 ~ "complete_7_of_7",
+      pH_days_used >= 4 ~ "partial_at_least_half",
+      pH_days_used > 0 ~ "partial_under_half",
+      TRUE ~ "no_data"
+    )
+  ) %>%
+  relocate(
+    event_id,
+    site_name,
+    location,
+    station,
+    month,
+    date_collected
+  )
+
+environmental_events_model
+```
+
+```{r}
+environmental_traits_7day_by_sample <- sample_metadata %>%
+  left_join(
+    environmental_events_model,
+    by = c(
+      "location",
+      "station",
+      "month",
+      "date_collected"
+    )
+  ) %>%
+  arrange(date_collected, location, oyster)
+
+environmental_traits_7day_by_sample
+```
+
+```{r}
+# Exactly 18 RNA-seq samples
+stopifnot(
+  nrow(environmental_traits_7day_by_sample) == 18
+)
+
+# Every sample ID should remain unique
+stopifnot(
+  !anyDuplicated(
+    environmental_traits_7day_by_sample$sample_id
+  )
+)
+
+# Every sample should match one environmental event
+stopifnot(
+  all(
+    !is.na(
+      environmental_traits_7day_by_sample$event_id
+    )
+  )
+)
+```
+
+```{r}
+sample_event_check <- environmental_traits_7day_by_sample %>%
+  count(
+    event_id,
+    location,
+    station,
+    month,
+    date_collected,
+    name = "RNAseq_samples"
+  )
+
+sample_event_check
+```
+
+```{r}
+write.csv(
+  environmental_events_model,
+  "environmental_events_7day_validated.csv",
+  row.names = FALSE
+)
+
+write.csv(
+  environmental_traits_7day_by_sample,
+  "environmental_traits_7day_by_sample.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+environmental_quality_summary <- environmental_events_model %>%
+  select(
+    event_id,
+    location,
+    station,
+    month,
+    date_collected,
+
+    temperature_days_used,
+
+    salinity_days_used,
+    salinity_coverage,
+    salinity_quality,
+
+    conductivity_days_used,
+    conductivity_coverage,
+    conductivity_quality,
+
+    DO_days_used,
+
+    pH_days_used,
+    pH_coverage,
+    pH_quality,
+
+    precipitation_days_used
+  )
+
+write.csv(
+  environmental_quality_summary,
+  "environmental_7day_data_quality_summary.csv",
+  row.names = FALSE
+)
+
+environmental_quality_summary
+```
+
+**02 - WGCNA**
+
+```{r}
+# Quick Check
+
+# Read the old analysis script as text
+old_analysis_code <- readLines(
+  "rstudio_analysis.Rmd",
+  warn = FALSE
+)
+
+# Find the important WGCNA steps
+grep(
+  pattern = paste(
+    "blockwiseModules",
+    "moduleEigengenes",
+    "moduleTrait",
+    "environmental_traits_by_sample",
+    sep = "|"
+  ),
+  x = old_analysis_code,
+  value = TRUE
+)
+```
+
+```{r}
+# ============================================================
+# 3A. Load and inspect WGCNA inputs
+# ============================================================
+
+# Load the saved VST-normalized expression object
+vst_object <- readRDS(
+  "oyster_deseq2_vst.rds"
+)
+
+# Check what type of object was saved
+class(vst_object)
+```
+
+```{r}
+# Extract the VST expression matrix
+if (inherits(vst_object, "SummarizedExperiment")) {
+
+  vst_matrix <- SummarizedExperiment::assay(
+    vst_object
+  )
+
+} else if (
+  is.matrix(vst_object) ||
+  is.data.frame(vst_object)
+) {
+
+  vst_matrix <- as.matrix(vst_object)
+
+} else {
+
+  stop(
+    "The saved VST object is not a recognized ",
+    "SummarizedExperiment, matrix, or data frame."
+  )
+}
+```
+
+```{r}
+dim(vst_matrix)
+
+head(
+  rownames(vst_matrix)
+)
+
+head(
+  colnames(vst_matrix)
+)
+```
+
+```{r}
+gene_modules <- read.csv(
+  "WGCNA_gene_modules.csv",
+  stringsAsFactors = FALSE,
+  check.names = FALSE
+)
+
+dim(gene_modules)
+
+names(gene_modules)
+
+head(gene_modules)
+```
+
+```{r}
+sample_name_check <- list(
+
+  metadata_not_in_VST = setdiff(
+    sample_metadata$sample_id,
+    colnames(vst_matrix)
+  ),
+
+  VST_not_in_metadata = setdiff(
+    colnames(vst_matrix),
+    sample_metadata$sample_id
+  )
+)
+
+sample_name_check
+```
+
+```{r}
+# ============================================================
+# 3B. Standardize VST sample names and verify gene overlap
+# ============================================================
+
+# Save a record of the original sequencing names
+vst_sample_name_map <- tibble::tibble(
+  original_sample_id = colnames(vst_matrix),
+
+  # Remove sequencing suffixes such as _S191_L005
+  sample_id = stringr::str_remove(
+    original_sample_id,
+    "_S[0-9]+_L[0-9]+$"
+  )
+)
+
+vst_sample_name_map
+```
+
+```{r}
+duplicated_cleaned_names <- vst_sample_name_map %>%
+  dplyr::count(sample_id) %>%
+  dplyr::filter(n > 1)
+
+duplicated_cleaned_names
+```
+
+```{r}
+colnames(vst_matrix) <- vst_sample_name_map$sample_id
+
+sample_name_check_cleaned <- list(
+  metadata_not_in_VST = setdiff(
+    sample_metadata$sample_id,
+    colnames(vst_matrix)
+  ),
+
+  VST_not_in_metadata = setdiff(
+    colnames(vst_matrix),
+    sample_metadata$sample_id
+  )
+)
+
+sample_name_check_cleaned
+```
+
+```{r}
+vst_matrix <- vst_matrix[
+  ,
+  sample_metadata$sample_id,
+  drop = FALSE
+]
+
+identical(
+  colnames(vst_matrix),
+  sample_metadata$sample_id
+)
+```
+
+```{r}
+# Remove incomplete module-assignment rows
+gene_modules_clean <- gene_modules %>%
+  dplyr::filter(
+    !is.na(gene_id),
+    !is.na(module),
+    gene_id != "",
+    module != ""
+  )
+
+# Confirm each gene has only one module assignment
+duplicate_module_genes <- gene_modules_clean %>%
+  dplyr::count(
+    gene_id,
+    name = "number_of_assignments"
+  ) %>%
+  dplyr::filter(number_of_assignments > 1)
+
+duplicate_module_genes
+```
+
+```{r}
+# Genes found in both the VST matrix and WGCNA module table
+overlap_genes <- intersect(
+  rownames(vst_matrix),
+  gene_modules_clean$gene_id
+)
+
+gene_overlap_summary <- tibble::tibble(
+  VST_genes = nrow(vst_matrix),
+
+  module_assignment_genes =
+    dplyr::n_distinct(gene_modules_clean$gene_id),
+
+  overlapping_genes =
+    length(overlap_genes),
+
+  module_genes_missing_from_VST =
+    length(
+      setdiff(
+        gene_modules_clean$gene_id,
+        rownames(vst_matrix)
+      )
+    )
+)
+
+gene_overlap_summary
+```
+
+```{r}
+module_sizes <- gene_modules_clean %>%
+  dplyr::filter(gene_id %in% overlap_genes) %>%
+  dplyr::count(
+    module,
+    name = "number_of_genes"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(number_of_genes)
+  )
+
+module_sizes
+```
+
+```{r}
+# ============================================================
+# 3C. Recalculate WGCNA module eigengenes
+# ============================================================
+
+library(WGCNA)
+
+# Keep only assigned biological modules.
+# Grey represents genes that were not assigned to a module.
+module_gene_table <- gene_modules_clean %>%
+  dplyr::filter(
+    module != "grey",
+    gene_id %in% rownames(vst_matrix)
+  ) %>%
+  dplyr::distinct(
+    gene_id,
+    module
+  )
+```
+
+```{r}
+nrow(module_gene_table)
+
+table(module_gene_table$module)
+```
+
+```{r}
+#Transposing
+datExpr_modules <- t(
+  vst_matrix[
+    module_gene_table$gene_id,
+    ,
+    drop = FALSE
+  ]
+)
+
+# Preserve the gene order explicitly
+colnames(datExpr_modules) <- module_gene_table$gene_id
+
+# Samples should remain the row names
+rownames(datExpr_modules) <- colnames(vst_matrix)
+
+dim(datExpr_modules)
+```
+
+```{r}
+module_colors <- module_gene_table$module
+
+names(module_colors) <- module_gene_table$gene_id
+```
+
+```{r}
+identical(
+  colnames(datExpr_modules),
+  names(module_colors)
+)
+```
+
+```{r}
+good_expression_check <- WGCNA::goodSamplesGenes(
+  datExpr_modules,
+  verbose = 3
+)
+
+good_expression_check$allOK
+```
+
+```{r}
+module_eigengenes <- WGCNA::moduleEigengenes(
+  expr = datExpr_modules,
+  colors = module_colors
+)$eigengenes
+
+# Put related eigengenes in a consistent order
+module_eigengenes <- WGCNA::orderMEs(
+  module_eigengenes
+)
+
+dim(module_eigengenes)
+
+colnames(module_eigengenes)
+
+head(module_eigengenes)
+```
+
+```{r}
+identical(
+  rownames(module_eigengenes),
+  sample_metadata$sample_id
+)
+```
+
+```{r}
+# ============================================================
+# 3D. Average module eigengenes within collection events
+# ============================================================
+
+# Convert row names into a regular sample ID column
+module_eigengene_samples <- as.data.frame(
+  module_eigengenes
+) %>%
+  tibble::rownames_to_column("sample_id")
+
+# Attach corrected environmental and collection information
+eigengenes_with_traits <- module_eigengene_samples %>%
+  dplyr::left_join(
+    environmental_traits_7day_by_sample,
+    by = "sample_id"
+  )
+
+# Basic checks
+dim(eigengenes_with_traits)
+
+sum(is.na(eigengenes_with_traits$event_id))
+```
+
+```{r}
+eigengenes_with_traits %>%
+  dplyr::count(
+    event_id,
+    location,
+    station,
+    month,
+    date_collected
+  )
+```
+
+```{r}
+module_columns <- colnames(module_eigengenes)
+
+event_module_eigengenes <- eigengenes_with_traits %>%
+  dplyr::group_by(
+    event_id,
+    location,
+    station,
+    month,
+    date_collected
+  ) %>%
+  dplyr::summarise(
+    dplyr::across(
+      dplyr::all_of(module_columns),
+      ~ mean(.x, na.rm = TRUE)
+    ),
+
+    RNAseq_samples = dplyr::n(),
+
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(date_collected)
+
+event_module_eigengenes
+```
+
+```{r}
+# ============================================================
+# 3E. Primary corrected module-environment heatmap
+# ============================================================
+
+primary_environment_traits <- environmental_events_model %>%
+  dplyr::select(
+    event_id,
+    temperature_7d_mean,
+    DO_7d_mean,
+    precipitation_7d_total_mm
+  )
+
+event_analysis_primary <- event_module_eigengenes %>%
+  dplyr::left_join(
+    primary_environment_traits,
+    by = "event_id"
+  ) %>%
+  dplyr::arrange(date_collected)
+
+event_analysis_primary
+```
+
+```{r}
+module_event_matrix <- event_analysis_primary %>%
+  dplyr::select(
+    dplyr::all_of(module_columns)
+  ) %>%
+  as.matrix()
+
+rownames(module_event_matrix) <-
+  event_analysis_primary$event_id
+
+
+primary_trait_columns <- c(
+  "temperature_7d_mean",
+  "DO_7d_mean",
+  "precipitation_7d_total_mm"
+)
+
+trait_event_matrix <- event_analysis_primary %>%
+  dplyr::select(
+    dplyr::all_of(primary_trait_columns)
+  ) %>%
+  as.matrix()
+
+rownames(trait_event_matrix) <-
+  event_analysis_primary$event_id
+```
+
+```{r}
+dim(module_event_matrix)
+dim(trait_event_matrix)
+
+anyNA(module_event_matrix)
+anyNA(trait_event_matrix)
+
+identical(
+  rownames(module_event_matrix),
+  rownames(trait_event_matrix)
+)
+```
+
+```{r}
+primary_module_trait_cor <- cor(
+  module_event_matrix,
+  trait_event_matrix,
+  method = "pearson"
+)
+
+primary_module_trait_p <- WGCNA::corPvalueStudent(
+  primary_module_trait_cor,
+  nSamples = nrow(event_analysis_primary)
+)
+```
+
+```{r}
+
+#Calculate false discovery rate adjusted p-values
+
+primary_module_trait_FDR <- matrix(
+  p.adjust(
+    as.vector(primary_module_trait_p),
+    method = "BH"
+  ),
+  nrow = nrow(primary_module_trait_p),
+  ncol = ncol(primary_module_trait_p),
+  dimnames = dimnames(primary_module_trait_p)
+)
+```
+
+```{r}
+#Heatmap labels
+
+primary_heatmap_text <- matrix(
+  paste0(
+    sprintf(
+      "%.2f",
+      primary_module_trait_cor
+    ),
+    "\n(p=",
+    sprintf(
+      "%.3f",
+      primary_module_trait_p
+    ),
+    ")"
+  ),
+  nrow = nrow(primary_module_trait_cor),
+  ncol = ncol(primary_module_trait_cor),
+  dimnames = dimnames(primary_module_trait_cor)
+)
+```
+
+```{r}
+plot_primary_environment_heatmap <- function() {
+
+  WGCNA::labeledHeatmap(
+    Matrix = primary_module_trait_cor,
+
+    xLabels = c(
+      "Temperature\n7-day mean",
+      "DO\n7-day mean",
+      "Precipitation\n7-day total"
+    ),
+
+    yLabels = rownames(
+      primary_module_trait_cor
+    ),
+
+    ySymbols = rownames(
+      primary_module_trait_cor
+    ),
+
+    colors = WGCNA::blueWhiteRed(50),
+
+    textMatrix = primary_heatmap_text,
+
+    setStdMargins = FALSE,
+
+    cex.text = 0.75,
+
+    zlim = c(-1, 1),
+
+    main = paste0(
+      "Corrected module-environment correlations\n",
+      "Six independent collection events"
+    )
+  )
+}
+
+# Display in RStudio
+plot_primary_environment_heatmap()
+```
+
+```{r}
+pdf(
+  "WGCNA_corrected_primary_environment_heatmap.pdf",
+  width = 9,
+  height = 7
+)
+
+plot_primary_environment_heatmap()
+
+dev.off()
+```
+
+```{r}
+primary_module_trait_results <- as.data.frame(
+  as.table(primary_module_trait_cor)
+)
+
+names(primary_module_trait_results) <- c(
+  "module",
+  "environmental_trait",
+  "correlation"
+)
+
+primary_module_trait_results$p_value <-
+  as.vector(primary_module_trait_p)
+
+primary_module_trait_results$FDR <-
+  as.vector(primary_module_trait_FDR)
+
+primary_module_trait_results <- primary_module_trait_results %>%
+  dplyr::arrange(
+    p_value
+  )
+
+primary_module_trait_results
+```
+
+```{r}
+write.csv(
+  primary_module_trait_results,
+  "WGCNA_corrected_primary_environment_results.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+#The strongest current associations are:
+
+#MEred vs DO: r=−0.82, raw p=0.047
+#MEblack vs DO: r=−0.80, raw p=0.054
+#MEgreen vs temperature: r=0.74, raw p=0.093
+#MEblue vs precipitation: r=−0.69, raw p=0.129
+```
+
+MEred and MEblack showed strong negative exploratory associations with dissolved oxygen, while MEgreen showed a positive association with temperature and MEblue showed a negative association with precipitation. None remained significant after multiple-testing correction, likely reflecting the limited number of independent collection events.
+
+```{r}
+# ============================================================
+# 3F. Spearman sensitivity analysis for complete traits
+# ============================================================
+
+spearman_module_trait_cor <- cor(
+  module_event_matrix,
+  trait_event_matrix,
+  method = "spearman",
+  use = "complete.obs"
+)
+
+# Calculate exact correlation-test p-values for each pair
+spearman_results <- expand.grid(
+  module = colnames(module_event_matrix),
+  environmental_trait = colnames(trait_event_matrix),
+  stringsAsFactors = FALSE
+) %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate(
+    correlation = cor(
+      module_event_matrix[, module],
+      trait_event_matrix[, environmental_trait],
+      method = "spearman"
+    ),
+
+    p_value = cor.test(
+      module_event_matrix[, module],
+      trait_event_matrix[, environmental_trait],
+      method = "spearman",
+      exact = FALSE
+    )$p.value
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    FDR = p.adjust(
+      p_value,
+      method = "BH"
+    )
+  ) %>%
+  dplyr::arrange(p_value)
+
+spearman_results
+```
+
+```{r}
+spearman_results %>%
+  dplyr::filter(
+    module %in% c(
+      "MEred",
+      "MEblack",
+      "MEgreen",
+      "MEblue"
+    )
+  ) %>%
+  dplyr::arrange(p_value)
+```
+
+```{r}
+#Our leading complete-data candidates are now:
+
+#MEblack–precipitation
+#MEblue–precipitation
+#MEblack–DO
+
+#The black module is especially interesting because it is positively associated with precipitation but negatively associated with dissolved oxygen. Before interpreting that biologically, we must check whether precipitation and DO themselves are correlated.
+```
+
+```{r}
+# ============================================================
+# 3G. Check correlations among complete environmental traits
+# ============================================================
+
+environment_trait_data <- event_analysis_primary %>%
+  dplyr::select(
+    event_id,
+    location,
+    month,
+    temperature_7d_mean,
+    DO_7d_mean,
+    precipitation_7d_total_mm
+  )
+
+environment_trait_data
+```
+
+```{r}
+environment_pearson_cor <- environment_trait_data %>%
+  dplyr::select(
+    temperature_7d_mean,
+    DO_7d_mean,
+    precipitation_7d_total_mm
+  ) %>%
+  cor(
+    method = "pearson",
+    use = "complete.obs"
+  )
+
+environment_spearman_cor <- environment_trait_data %>%
+  dplyr::select(
+    temperature_7d_mean,
+    DO_7d_mean,
+    precipitation_7d_total_mm
+  ) %>%
+  cor(
+    method = "spearman",
+    use = "complete.obs"
+  )
+
+environment_pearson_cor
+environment_spearman_cor
+```
+
+```{r}
+precip_DO_pearson <- cor.test(
+  environment_trait_data$precipitation_7d_total_mm,
+  environment_trait_data$DO_7d_mean,
+  method = "pearson"
+)
+
+precip_DO_spearman <- cor.test(
+  environment_trait_data$precipitation_7d_total_mm,
+  environment_trait_data$DO_7d_mean,
+  method = "spearman",
+  exact = FALSE
+)
+
+precip_DO_pearson
+precip_DO_spearman
+
+#Main finding: precipitation and DO move in opposite directions
+
+#Collection windows with more precipitation tended to have lower dissolved oxygen. This could be collinearity or confounding variables.
+
+#MEblack is associated with an environmental gradient characterized by higher precipitation and lower dissolved oxygen
+```
+
+```{r}
+#MEblack showed a strong association with an environmental pattern involving higher precipitation and lower dissolved oxygen.
+
+#MEblue showed a consistent negative association with precipitation across Pearson and Spearman analyses.
+
+#None of the associations survived multiple-testing correction, and the small number of independent collection events limits statistical certainty.
+```
+
+```{r}
+# ============================================================
+# 3H. Visualize precipitation and dissolved oxygen
+# ============================================================
+
+library(ggplot2)
+
+ggplot(
+  environment_trait_data,
+  aes(
+    x = precipitation_7d_total_mm,
+    y = DO_7d_mean,
+    shape = month,
+    label = event_id
+  )
+) +
+  geom_point(size = 3) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE
+  ) +
+  geom_text(
+    vjust = -0.8,
+    check_overlap = TRUE,
+    size = 3
+  ) +
+  labs(
+    title = "Seven-day precipitation versus dissolved oxygen",
+    subtitle = "Six independent oyster collection events",
+    x = "Seven-day precipitation total (mm)",
+    y = "Seven-day mean dissolved oxygen"
+  ) +
+  theme_minimal()
+
+#Precipitation and DO showed an overall negative association across the six events, but this pattern may be partly driven by seasonal differences and the unusually low dissolved oxygen observed at DAF in August.
+```
+
+```{r}
+ggplot(
+  environment_trait_data,
+  aes(
+    x = precipitation_7d_total_mm,
+    y = DO_7d_mean
+  )
+) +
+  geom_point(
+    aes(shape = month),
+    size = 3
+  ) +
+  geom_smooth(
+    aes(group = 1),
+    method = "lm",
+    se = TRUE
+  ) +
+  geom_text(
+    aes(label = event_id),
+    vjust = -0.8,
+    check_overlap = TRUE,
+    size = 3
+  ) +
+  labs(
+    title = "Seven-day precipitation versus dissolved oxygen",
+    subtitle = "Six independent oyster collection events",
+    x = "Seven-day precipitation total (mm)",
+    y = "Seven-day mean dissolved oxygen",
+    shape = "Month"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# ============================================================
+# 3I. Leave-one-event-out sensitivity analysis
+# ============================================================
+
+leave_one_out_precip_DO <- purrr::map_dfr(
+  seq_len(nrow(environment_trait_data)),
+  function(i) {
+
+    reduced_data <- environment_trait_data[-i, ]
+
+    tibble::tibble(
+      removed_event =
+        environment_trait_data$event_id[i],
+
+      pearson_correlation = cor(
+        reduced_data$precipitation_7d_total_mm,
+        reduced_data$DO_7d_mean,
+        method = "pearson"
+      ),
+
+      spearman_correlation = cor(
+        reduced_data$precipitation_7d_total_mm,
+        reduced_data$DO_7d_mean,
+        method = "spearman"
+      )
+    )
+  }
+)
+
+leave_one_out_precip_DO
+
+#Across the six collection events, higher seven-day precipitation generally coincided with lower dissolved oxygen. The direction remains negative when any single event is removed, although the magnitude is sensitive to which event is excluded.
+```
+
+**04 - Linear Regression**
+
+```{r}
+
+# ============================================================
+# 4A. Linear regression: MEblack versus precipitation
+# ============================================================
+
+MEblack_precip_data <- event_analysis_primary %>%
+  dplyr::select(
+    event_id,
+    location,
+    month,
+    MEblack,
+    precipitation_7d_total_mm
+  ) %>%
+  dplyr::mutate(
+    # Express precipitation in 10-mm units for easier interpretation
+    precipitation_10mm =
+      precipitation_7d_total_mm / 10
+  )
+
+MEblack_precip_data
+```
+
+```{r}
+MEblack_precip_model <- lm(
+  MEblack ~ precipitation_10mm,
+  data = MEblack_precip_data
+)
+
+summary(MEblack_precip_model)
+```
+
+```{r}
+confint(
+  MEblack_precip_model,
+  level = 0.95
+)
+```
+
+```{r}
+MEblack_precip_diagnostics <- MEblack_precip_data %>%
+  dplyr::mutate(
+    fitted_value = fitted(MEblack_precip_model),
+    residual = residuals(MEblack_precip_model),
+    cooks_distance = cooks.distance(MEblack_precip_model)
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(cooks_distance)
+  )
+
+MEblack_precip_diagnostics
+```
+
+```{r}
+4 / nrow(MEblack_precip_data)
+
+#For every additional 10 mm of precipitation over the seven-day window, MEblack is estimated to increase by about 0.076 eigengene units.
+
+#MEblack tended to increase with seven-day precipitation, but the evidence was inconclusive given the small number of independent collection events.
+
+#The raw R² suggests precipitation accounts for about 45% of the observed variation in MEblack across the six events.After adjusting for the very small sample size, that drops to about 31%. That is still potentially meaningful, but quite uncertain.
+```
+
+```{r}
+#June: low precipitation and low MEblack
+#July: moderate precipitation and low/slightly higher MEblack
+#August: high precipitation and much higher MEblack
+```
+
+```{r}
+# ============================================================
+# 4B. Leave-one-event-out MEblack precipitation regression
+# ============================================================
+
+MEblack_precip_leave_one_out <- purrr::map_dfr(
+  seq_len(nrow(MEblack_precip_data)),
+  function(i) {
+
+    reduced_data <- MEblack_precip_data[-i, ]
+
+    reduced_model <- stats::lm(
+      MEblack ~ precipitation_10mm,
+      data = reduced_data
+    )
+
+    model_summary <- summary(reduced_model)
+
+    tibble::tibble(
+      removed_event = MEblack_precip_data$event_id[i],
+
+      precipitation_coefficient =
+        stats::coef(reduced_model)[["precipitation_10mm"]],
+
+      p_value =
+        model_summary$coefficients[
+          "precipitation_10mm",
+          "Pr(>|t|)"
+        ],
+
+      R_squared =
+        model_summary$r.squared,
+
+      adjusted_R_squared =
+        model_summary$adj.r.squared
+    )
+  }
+)
+
+MEblack_precip_leave_one_out
+
+#The positive association between precipitation and the black-module eigengene was directionally robust to removing individual collection events. However, the estimated magnitude varied, and statistical uncertainty remained high because only six independent collection events were available.
+```
+
+```{r}
+# ============================================================
+# 4C. Plot MEblack versus seven-day precipitation
+# ============================================================
+
+MEblack_precip_plot <- ggplot(
+  MEblack_precip_data,
+  aes(
+    x = precipitation_7d_total_mm,
+    y = MEblack
+  )
+) +
+  geom_point(
+    aes(shape = month),
+    size = 3
+  ) +
+  geom_smooth(
+    aes(group = 1),
+    method = "lm",
+    se = TRUE
+  ) +
+  geom_text(
+    aes(label = event_id),
+    vjust = -0.8,
+    check_overlap = TRUE,
+    size = 3
+  ) +
+  labs(
+    title = "Black module eigengene versus precipitation",
+    subtitle = "Six independent oyster collection events",
+    x = "Seven-day precipitation total (mm)",
+    y = "MEblack",
+    shape = "Month"
+  ) +
+  theme_minimal()
+
+MEblack_precip_plot
+```
+
+```{r}
+ggsave(
+  "MEblack_vs_precipitation_7day.png",
+  plot = MEblack_precip_plot,
+  width = 9,
+  height = 6,
+  dpi = 300
+)
+
+#MEblack increased along a seasonal gradient that also corresponded with increasing seven-day precipitation. The available data cannot clearly separate precipitation from month.
+```
+
+```{r}
+# ============================================================
+# 4D. Compare MEblack patterns across months
+# ============================================================
+
+MEblack_month_data <- MEblack_precip_data %>%
+  dplyr::mutate(
+    month = factor(
+      month,
+      levels = c("Jun", "Jul", "Aug")
+    )
+  )
+
+# Summarize the two collection events in each month
+MEblack_month_summary <- MEblack_month_data %>%
+  dplyr::group_by(month) %>%
+  dplyr::summarise(
+    mean_MEblack = mean(MEblack),
+    minimum_MEblack = min(MEblack),
+    maximum_MEblack = max(MEblack),
+    number_of_events = dplyr::n(),
+    .groups = "drop"
+  )
+
+MEblack_month_summary
+```
+
+```{r}
+MEblack_month_model <- lm(
+  MEblack ~ month,
+  data = MEblack_month_data
+)
+
+summary(MEblack_month_model)
+```
+
+```{r}
+model_comparison <- tibble::tibble(
+  model = c(
+    "Precipitation",
+    "Month"
+  ),
+
+  R_squared = c(
+    summary(MEblack_precip_model)$r.squared,
+    summary(MEblack_month_model)$r.squared
+  ),
+
+  adjusted_R_squared = c(
+    summary(MEblack_precip_model)$adj.r.squared,
+    summary(MEblack_month_model)$adj.r.squared
+  ),
+
+  AIC = c(
+    AIC(MEblack_precip_model),
+    AIC(MEblack_month_model)
+  )
+)
+
+model_comparison
+
+#MEblack was substantially higher in August than in June or July. Because seven-day precipitation also rose strongly from June through August, the apparent precipitation association likely reflects a broader seasonal pattern rather than an independently identifiable precipitation effect.
+```
+
+```{r}
+MEblack_month_plot <- ggplot(
+  MEblack_month_data,
+  aes(
+    x = month,
+    y = MEblack,
+    group = location,
+    shape = location
+  )
+) +
+  geom_line() +
+  geom_point(size = 3) +
+  geom_text(
+    aes(label = event_id),
+    vjust = -0.8,
+    check_overlap = TRUE,
+    size = 3
+  ) +
+  labs(
+    title = "Black module eigengene across collection months",
+    subtitle = "Lines connect collection events from the same location",
+    x = "Collection month",
+    y = "MEblack",
+    shape = "Location"
+  ) +
+  theme_minimal()
+
+MEblack_month_plot
+```
+
+```{r}
+# ============================================================
+# 4E. Compare paired DAF and CMT MEblack values by month
+# ============================================================
+
+MEblack_location_differences <- MEblack_month_data %>%
+  dplyr::select(
+    month,
+    location,
+    MEblack
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = location,
+    values_from = MEblack
+  ) %>%
+  dplyr::mutate(
+    DAF_minus_CMT = DAF - CMT
+  )
+
+MEblack_location_differences
+```
+
+```{r}
+MEblack_month_plot <- ggplot(
+  MEblack_month_data,
+  aes(
+    x = month,
+    y = MEblack,
+    group = location,
+    shape = location
+  )
+) +
+  geom_line() +
+  geom_point(size = 3) +
+  geom_text(
+    aes(label = event_id),
+    vjust = -0.8,
+    size = 3,
+    check_overlap = TRUE
+  ) +
+  labs(
+    title = "Black module eigengene across collection months",
+    subtitle = "Lines connect collection events from the same location",
+    x = "Collection month",
+    y = "MEblack",
+    shape = "Location"
+  ) +
+  theme_minimal()
+
+MEblack_month_plot
+
+#The black module was relatively stable and similar between locations in June and July, then increased at both locations in August, with a much larger August increase at DAF.
+
+#MEblack was associated with a seasonal gradient that included increasing precipitation, but the pronounced August increase at DAF suggests additional site-specific environmental or biological factors.
+```
+
+```{r}
+# ============================================================
+# 4F. Compare month-only and additive month + location models
+# ============================================================
+
+MEblack_month_location_data <- MEblack_month_data %>%
+  dplyr::mutate(
+    location = factor(
+      location,
+      levels = c("CMT", "DAF")
+    )
+  )
+
+MEblack_month_location_model <- lm(
+  MEblack ~ month + location,
+  data = MEblack_month_location_data
+)
+
+summary(MEblack_month_location_model)
+```
+
+```{r}
+model_comparison_extended <- tibble::tibble(
+  model = c(
+    "Precipitation",
+    "Month",
+    "Month + location"
+  ),
+
+  R_squared = c(
+    summary(MEblack_precip_model)$r.squared,
+    summary(MEblack_month_model)$r.squared,
+    summary(MEblack_month_location_model)$r.squared
+  ),
+
+  adjusted_R_squared = c(
+    summary(MEblack_precip_model)$adj.r.squared,
+    summary(MEblack_month_model)$adj.r.squared,
+    summary(MEblack_month_location_model)$adj.r.squared
+  ),
+
+  AIC = c(
+    AIC(MEblack_precip_model),
+    AIC(MEblack_month_model),
+    AIC(MEblack_month_location_model)
+  )
+)
+
+model_comparison_extended
+
+#MEblack variation was explained primarily by collection month, with a strong increase in August. Adding an overall location effect did not materially improve the model.
+```
+
+```{r}
+anova(
+  MEblack_month_model,
+  MEblack_month_location_model
+)
+
+#MEblack remained similar between June and July and increased strongly in August at both locations. The increase was substantially larger at DAF, but the dataset is too small to formally test a month-by-location interaction. Month described MEblack better than precipitation alone, and adding a constant location effect did not improve the model.
+```
+
+```{r}
+# Check whether the interaction model (location * month) would be saturated
+interaction_design <- model.matrix(
+  ~ month * location,
+  data = MEblack_month_location_data
+)
+
+tibble::tibble(
+  observations = nrow(interaction_design),
+  model_parameters = qr(interaction_design)$rank,
+  residual_degrees_of_freedom =
+    nrow(interaction_design) - qr(interaction_design)$rank
+)
+```
+
+```{r}
+# ============================================================
+# 4G. Complete simple module-regression screening table
+# ============================================================
+
+run_simple_module_model <- function(
+    module_name,
+    predictor_name,
+    analysis_data
+) {
+
+  model_formula <- stats::reformulate(
+    predictor_name,
+    response = module_name
+  )
+
+  fitted_model <- stats::lm(
+    model_formula,
+    data = analysis_data
+  )
+
+  model_summary <- summary(fitted_model)
+  coefficient_table <- model_summary$coefficients
+
+  confidence_interval <- stats::confint(
+    fitted_model,
+    level = 0.95
+  )
+
+  tibble::tibble(
+    module = module_name,
+    predictor = predictor_name,
+    n_events = stats::nobs(fitted_model),
+
+    coefficient =
+      stats::coef(fitted_model)[[predictor_name]],
+
+    standard_error =
+      coefficient_table[
+        predictor_name,
+        "Std. Error"
+      ],
+
+    t_value =
+      coefficient_table[
+        predictor_name,
+        "t value"
+      ],
+
+    p_value =
+      coefficient_table[
+        predictor_name,
+        "Pr(>|t|)"
+      ],
+
+    confidence_low =
+      confidence_interval[
+        predictor_name,
+        1
+      ],
+
+    confidence_high =
+      confidence_interval[
+        predictor_name,
+        2
+      ],
+
+    R_squared =
+      model_summary$r.squared,
+
+    adjusted_R_squared =
+      model_summary$adj.r.squared,
+
+    AIC = stats::AIC(fitted_model)
+  )
+}
+```
+
+```{r}
+#Run every module trait comparison
+
+all_primary_module_regressions <- tidyr::crossing(
+  module = module_columns,
+  predictor = primary_trait_columns
+) %>%
+  purrr::pmap_dfr(
+    function(module, predictor) {
+      run_simple_module_model(
+        module_name = module,
+        predictor_name = predictor,
+        analysis_data = event_analysis_primary
+      )
+    }
+  ) %>%
+  dplyr::mutate(
+    FDR = stats::p.adjust(
+      p_value,
+      method = "BH"
+    )
+  ) %>%
+  dplyr::arrange(p_value)
+
+all_primary_module_regressions
+```
+
+```{r}
+write.csv(
+  all_primary_module_regressions,
+  "WGCNA_corrected_primary_module_regressions.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+saveRDS(
+  module_eigengenes,
+  "WGCNA_corrected_module_eigengenes.rds"
+)
+
+saveRDS(
+  event_module_eigengenes,
+  "WGCNA_event_level_module_eigengenes.rds"
+)
+
+saveRDS(
+  list(
+    MEblack_precipitation = MEblack_precip_model,
+    MEblack_month = MEblack_month_model,
+    MEblack_month_location =
+      MEblack_month_location_model
+  ),
+  "WGCNA_candidate_module_models.rds"
+)
+
+writeLines(
+  capture.output(sessionInfo()),
+  "environmental_regression_sessionInfo.txt"
+)
+```
+
+```{r}
+
+#Questions I need answered before contiuing
+
+#Are backup or uncleaned logger files available for the missing salinity, conductivity, and pH periods?
+
+#Is temperature from the DO sensor an acceptable substitute for the incomplete salinity logger temperature?
+
+#Should the exposure window include collection day plus the previous six days, or the preceding 168 hours before collection?
+
+#Is precipitation one shared regional measurement, or should each site have its own precipitation source?
+
+#For later gene-level modeling, should oyster identity be treated as a repeated-measures effect?
+
+#Does the large DAF-specific MEblack increase in August align with any known farm event, stressor, handling difference, storm, mortality, or water-quality change?
+```
+
+```{r}
+#corrected the reversed station mapping;
+
+#rebuilt seven-day environmental exposures;
+
+#documented missing sensor coverage;
+
+#recalculated WGCNA eigengenes;
+
+#rebuilt the environmental correlation heatmap;
+
+#found that the old MEblue–DO result does not persist;
+
+#identified MEblack as associated with a seasonal pattern involving precipitation and DO;
+
+#found that month explains MEblack better than precipitation alone;
+
+#observed a potentially DAF-specific August increase that cannot yet be formally tested.
+```
