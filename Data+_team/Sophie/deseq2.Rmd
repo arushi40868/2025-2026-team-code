@@ -244,6 +244,7 @@ dds_time$Location <- relevel(dds_time$Location, ref = "DAF")
 # filter
 keep <- rowSums(counts(dds_time) >= 10) >=3
 dds_time <- dds_time[keep,]
+dds_time # 21981 genes
 
 # run DESeq2
 dds_time <- DESeq(dds_time)
@@ -255,7 +256,7 @@ top_month_genes <- rownames(results_time)[order(results_time$padj)][1:12]
 vsd_time <- vst(dds_time, blind = FALSE)
 
 # fix months
-colData(vsd_time)$CollectionDate <- env_data$CollectionDate
+colData(vsd_time)$CollectionDate <- as.Date(col_data$Date_Collected)
 colData(vsd_time)$Month <- factor(
   format(colData(vsd_time)$CollectionDate, "%B"),
   levels = c("June", "July", "August")
@@ -287,6 +288,26 @@ ggplot(plot_df,
   labs(y = "VST-normalized expression",
        x = "Month")
 ```
+# PCA plot with Location * Month design
+```{r}
+# create PCA plot with month and location
+pcaData_location_month_design <- plotPCA(
+    vsd_time,
+    intgroup = c("Location", "Month"),
+    returnData = TRUE
+)
+
+ggplot(pcaData_location_month_design, 
+       aes(x = PC1, y = PC2, color = Month, shape = Location)) + geom_point(size = 3) + 
+  scale_color_manual(
+    values = c(
+      "June" = "red",
+      "July" = "forestgreen",
+      "August" = "blue"
+    )
+  )
+```
+
 # DESeq2 Results Subset by Month
 ```{r}
 # june
@@ -639,31 +660,34 @@ do$DateTime <- as.Date(do$DateTime)
 precip$DateTime <- as.Date(precip$DateTime)
 
 # create variable for sample collection dates
-collection_dates <- as.Date(c("2024-06-20", "2024-07-22", "2024-08-19"))
-col_data$CollectionDate <- collection_dates
+col_data$CollectionDate <- as.Date(col_data$Date_Collected)
 ```
 
 # Salinity
 ```{r}
 # calculate 7-day average for the 7 days before the collection dates
+salinity <- salinity %>%
+  mutate(Farm = recode(Farm, "DUML" = "DAF", "CMAST" = "CMT"))
+
 salinity_avg <- salinity %>%
   group_by(Farm) %>%
   group_modify(~{
+    sample_dates <- sort(unique(
+      col_data$CollectionDate[col_data$Location == .y$Farm]
+    ))
     data.frame(
-      CollectionDate = collection_dates,
+      CollectionDate = sample_dates,
       Salinity_7d_Avg = sapply(
-        collection_dates, 
+        sample_dates, 
         function(date){
           mean(.x$Sal_ppt[.x$DateTime >= date - 7 & .x$DateTime <= date], na.rm = TRUE)
         }
       )
     )
   }) %>%
-  ungroup()
+  ungroup() %>%
+  rename(Location = Farm)
 
-salinity_avg$Location <- recode(
-  salinity_avg$Farm, "DUML" = "DAF", "CMAST" = "CMT"
-)
 
 salinity_avg
 
@@ -708,21 +732,25 @@ ggplot(
 temp_avg <- salinity %>%
   group_by(Farm) %>%
   group_modify(~{
+    sample_dates <- sort(unique(
+      col_data$CollectionDate[col_data$Location == .y$Farm]
+    ))
     data.frame(
-      CollectionDate = collection_dates,
+      CollectionDate = sample_dates,
       Temp_7d_Avg = sapply(
-        collection_dates, 
+        sample_dates, 
         function(date){
           mean(.x$Temp_C[.x$DateTime >= date - 7 & .x$DateTime <= date], na.rm = TRUE)
         }
       )
     )
   }) %>%
-  ungroup()
+  ungroup() %>%
+  rename(Location = Farm)
 
-temp_avg$Location <- recode(
-  temp_avg$Farm, "DUML" = "DAF", "CMAST" = "CMT"
-)
+# temp_avg$Location <- recode(
+#   temp_avg$Farm, "DUML" = "DAF", "CMAST" = "CMT"
+# )
 
 # create environmental data table
 env_data <- left_join(
@@ -762,24 +790,27 @@ ggplot(
 # pH
 ```{r}
 # calculate 7-day average for the 7 days before the collection dates
+ph <- ph %>%
+  mutate(Farm = recode(Farm, "DUML" = "DAF", "CMAST" = "CMT"))
+
 ph_avg <- ph %>%
   group_by(Farm) %>%
   group_modify(~{
+    sample_dates <- sort(unique(
+      col_data$CollectionDate[col_data$Location == .y$Farm]
+    ))
     data.frame(
-      CollectionDate = collection_dates,
+      CollectionDate = sample_dates,
       pH_7d_Avg = sapply(
-        collection_dates, 
+        sample_dates, 
         function(date){
           mean(.x$pH[.x$DateTime >= date - 7 & .x$DateTime <= date], na.rm = TRUE)
         }
       )
     )
   }) %>%
-  ungroup()
-
-ph_avg$Location <- recode(
-  ph_avg$Farm, "DUML" = "DAF", "CMAST" = "CMT"
-)
+  ungroup() %>%
+  rename(Location = Farm)
 
 ph_avg
 
@@ -821,24 +852,27 @@ ggplot(
 # Dissolved Oxygen
 ```{r}
 # calculate 7-day average for the 7 days before the collection dates
+do <- do %>%
+  mutate(Farm = recode(Farm, "DUML" = "DAF", "CMAST" = "CMT"))
+
 do_avg <- do %>%
   group_by(Farm) %>%
   group_modify(~{
+    sample_dates <- sort(unique(
+      col_data$CollectionDate[col_data$Location == .y$Farm]
+    ))
     data.frame(
-      CollectionDate = collection_dates,
+      CollectionDate = sample_dates,
       DO_7d_Avg = sapply(
-        collection_dates, 
+        sample_dates, 
         function(date){
           mean(.x$DomgL[.x$DateTime >= date - 7 & .x$DateTime <= date], na.rm = TRUE)
         }
       )
     )
   }) %>%
-  ungroup()
-
-do_avg$Location <- recode(
-  do_avg$Farm, "DUML" = "DAF", "CMAST" = "CMT"
-)
+  ungroup() %>%
+  rename(Location = Farm)
 
 do_avg
 
@@ -985,36 +1019,6 @@ rownames(env_mat) <- rownames(col_data)
 correlation_matrix <- cor(env_mat, method = "spearman", use = "complete.obs")
 correlation_matrix
 ```
-
-# Yale 2025 Genome
-```{r}
-# combine all sample counts into one matrix with all 18 samples
-count_25_dir <- "/work/clh162/henry/htseq_counts_CvYale2025"
-
-# get all count files in the directory
-count_files <- list.files(
-  count_25_dir,
-  pattern = "_counts\\.txt$",
-  full.names = TRUE
-)
-
-# create count matrix 
-count_25_matrix <- count_files %>%
-  map(function(file) {
-    sample_name <- sub(
-      "_counts$",
-      "",
-      tools::file_path_sans_ext(basename(file))
-    )
-    read_tsv(file, col_names = c("gene_id", "count")) %>%
-      rename(!!sample_name := count) # replace count with sample name
-  }) %>%
-  reduce(full_join, by = "gene_id") %>%
-  replace(is.na(.), 0)
-
-```
-
-
 # Saving the Objects
 ```{r}
 # save SummarizedExperiment
@@ -1022,6 +1026,7 @@ saveRDS(se, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sop
 
 # save DESeqDataSet object
 saveRDS(dds, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/dds_object.rds")
+saveRDS(dds_time, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/dds_time.rds")
 
 # save column data
 saveRDS(col_data, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/col_data.rds")
