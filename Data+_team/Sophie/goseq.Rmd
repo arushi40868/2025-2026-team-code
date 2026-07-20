@@ -19,7 +19,7 @@ library(ggplot2)
 # load in DESeq2 object
 dds <- readRDS("/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/dds_object.rds")
 
-# convert results to data frame and sort for top 500 differentially expressed genes
+# convert results to data frame 
 results <- as.data.frame(results(dds))
 results <- results %>%
   rownames_to_column("gene_id") %>%
@@ -56,7 +56,7 @@ new_dds_results <- results %>%
 saveRDS(new_dds_results, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/new_dds_results.rds")
 ```
 
-# run goseq
+# GOSeq for Location Design
 ```{r}
 # get ensembl data (mart is a database connection)
 mart <- useMart("metazoa_mart",
@@ -70,6 +70,7 @@ attributes <- getBM(attributes = c("ensembl_gene_id", "transcript_length", "go_i
 
 # gene2cat is a table of ensembl gene ids and go ids - it maps each gene (ensembl gene id) to a category (go term/id) and does not include the genes that do not have a go id associated with it
 gene2cat <- attributes[attributes$go_id != "", c("ensembl_gene_id", "go_id")]
+saveRDS(gene2cat, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/gene2cat.rds")
 
 # make a table of ensembl id and gene lengths - group the transcript lengths by ensembl id and select the max length so there is only one length per gene
 gene_lengths <- aggregate(
@@ -108,7 +109,7 @@ goseq_results$padj <- p.adjust(goseq_results$over_represented_pvalue, method = "
 # filter for significant GO terms AFTER multiple test correction with BH using BH-adjusted p-values - these are the enriched GO terms
 enriched_go <- goseq_results[goseq_results$padj < 0.05, ]
 
-# create bubble (?) plot of different functions and the percentage of differentially expressed genes in each function category
+# create bubble plot of different functions and the percentage of differentially expressed genes in each function category
 plot_df <- goseq_results %>%
   mutate(
     percent_DE = (numDEInCat/numInCat) * 100 # percent DE in each category
@@ -132,6 +133,81 @@ ggplot(plot_df, aes(x = percent_DE, y = term)) +
 
 ```
 
+# GOSeq for Location * Month Design
+```{r}
+dds_time <- readRDS("/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/dds_time.rds")
+
+results_time <- as.data.frame(results(dds_time))
+results_time <- results_time %>%
+  rownames_to_column("gene_id") %>%
+  filter(!is.na(padj)) %>%
+  arrange(padj)
+
+results_time <- results_time %>%
+  left_join(
+    diamond %>%
+      dplyr::select(gene_id, protein_id),
+    by = "gene_id"
+  ) %>%
+  left_join(
+    protein_and_gene,
+    by = "protein_id"
+  )
+```
+
+```{r}
+# create a vector from the dds results of differentially expressed genes where 1 = significant and 0 = not significant and the names of each element are the ensembl ids (same as gene symbols)
+genes_vector <- as.integer(results_time$padj < 0.05 & !is.na(results_time$padj))
+names(genes_vector) <- results_time$gene_symbol
+
+# create a list of common ids where only the common genes between the length vector and genes vector are kept
+common_ids <- intersect(names(genes_vector), names(length_vector))
+
+# subset the genes vector and length vector to only include the ones in the common ids list
+genes_vector <- genes_vector[common_ids]
+length_vector <- length_vector[common_ids]
+
+# weight the genes vector by the length vector (longer transcripts are more likely to be detected as differentially expressed)
+# nullp() function calculates probability weighting function (pwf)
+pwf <- nullp(genes_vector, bias.data = length_vector)
+
+# run goseq with pwf and gene2cat as the inputs
+goseq_results_time <- goseq(pwf, gene2cat = gene2cat)
+
+# multiple test correction with BH (Benjamini-Hochberg procedure) --> created adjusted p-values to account for the fact that very low p-values can happen simply by chance if you conduct multiple tests (each test is a GO term)
+# controls false discovery rate (FDR)
+# replace all the p-values with the BH-adjusted p-values
+goseq_results_time$padj <- p.adjust(goseq_results_time$over_represented_pvalue, method = "BH")
+
+# filter for significant GO terms AFTER multiple test correction with BH using BH-adjusted p-values - these are the enriched GO terms
+enriched_go_time <- goseq_results_time[goseq_results_time$padj < 0.05, ]
+
+# create bubble plot of different functions and the percentage of differentially expressed genes in each function category
+plot_df <- goseq_results_time %>%
+  mutate(
+    percent_DE = (numDEInCat/numInCat) * 100 # percent DE in each category
+  ) %>%
+  arrange(over_represented_pvalue) %>%
+  slice_head(n = 10) %>%
+  mutate(
+    term = factor(term, levels = rev(term))
+  )
+
+ggplot(plot_df, aes(x = percent_DE, y = term)) + 
+  geom_point(aes(size = numInCat, color = over_represented_pvalue), alpha = 0.8) +
+  scale_size_continuous(name = "Count") + 
+  scale_color_gradient(name = "p-value") + 
+  labs(
+    title = "Top enriched GO categories: CMT vs. DAF - June",
+    subtitle = "GOseq Wallenius method",
+    x = "% DE in category",
+    y = "Category"
+  )
+
+saveRDS(results_time, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/results_time.rds")
+saveRDS(goseq_results_time, "/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/goseq_results_time.rds")
+```
+
 # GOSeq Pairwise Comparisons: CMT vs. DAF for each month
 ```{r}
 # load pairwise dds results
@@ -139,6 +215,7 @@ results_june <- readRDS("/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Da
 results_july <- readRDS("/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/results_july.rds")
 results_august <- readRDS("/work/clh162/Data+/Sophie/2025-2026-team-code-sac165/Data+_team/Sophie/results_august.rds")
 
+# turn results objects into dataframes and make gene ids a column
 results_june <- as.data.frame(results_june) %>%
   rownames_to_column("gene_id")
 results_july <- as.data.frame(results_july) %>%
@@ -146,6 +223,15 @@ results_july <- as.data.frame(results_july) %>%
 results_august <- as.data.frame(results_august) %>%
   rownames_to_column("gene_id")
 
+# filter out NA padj values
+results_june <- results_june %>%
+  filter(!is.na(padj))
+results_july <- results_july %>%
+  filter(!is.na(padj))
+results_august <- results_august %>%
+  filter(!is.na(padj))
+
+# add gene id and protein id to the results objects
 results_june <- results_june %>%
   left_join(
     diamond %>%
@@ -207,7 +293,7 @@ goseq_results_june$padj <- p.adjust(goseq_results_june$over_represented_pvalue, 
 # filter for significant GO terms AFTER multiple test correction with BH using BH-adjusted p-values - these are the enriched GO terms
 enriched_go_june <- goseq_results_june[goseq_results_june$padj < 0.05, ]
 
-# create bubble (?) plot of different functions and the percentage of differentially expressed genes in each function category
+# create bubble plot of different functions and the percentage of differentially expressed genes in each function category
 plot_df <- goseq_results_june %>%
   mutate(
     percent_DE = (numDEInCat/numInCat) * 100 # percent DE in each category
@@ -257,7 +343,7 @@ goseq_results_july$padj <- p.adjust(goseq_results_july$over_represented_pvalue, 
 # filter for significant GO terms AFTER multiple test correction with BH using BH-adjusted p-values - these are the enriched GO terms
 enriched_go_july <- goseq_results_july[goseq_results_july$padj < 0.05, ]
 
-# create bubble (?) plot of different functions and the percentage of differentially expressed genes in each function category
+# create bubble plot of different functions and the percentage of differentially expressed genes in each function category
 plot_df <- goseq_results_july %>%
   mutate(
     percent_DE = (numDEInCat/numInCat) * 100 # percent DE in each category
@@ -307,7 +393,7 @@ goseq_results_august$padj <- p.adjust(goseq_results_august$over_represented_pval
 # filter for significant GO terms AFTER multiple test correction with BH using BH-adjusted p-values - these are the enriched GO terms
 enriched_go_august <- goseq_results_august[goseq_results_august$padj < 0.05, ]
 
-# create bubble (?) plot of different functions and the percentage of differentially expressed genes in each function category
+# create bubble plot of different functions and the percentage of differentially expressed genes in each function category
 plot_df <- goseq_results_august %>%
   mutate(
     percent_DE = (numDEInCat/numInCat) * 100 # percent DE in each category
@@ -341,7 +427,7 @@ results_cmt_august_july <- readRDS("/work/clh162/Data+/Sophie/2025-2026-team-cod
 
 # DAF July vs. June
 results_daf_july_june <- as.data.frame(results_daf_july_june) %>%
-  rownames_to_column("gene_id")
+  rownames_to_column("gene_id") 
 results_daf_july_june <- results_daf_july_june %>%
   left_join(
     diamond %>%
@@ -423,6 +509,19 @@ results_cmt_august_july <- results_cmt_august_july %>%
     by = "protein_id"
   )
 
+# filter out NA padj
+results_daf_july_june <- results_daf_july_june %>%
+  filter(!is.na(padj))
+results_daf_august_june <- results_daf_august_june %>%
+  filter(!is.na(padj))
+results_daf_august_july <- results_daf_august_july %>%
+  filter(!is.na(padj))
+results_cmt_july_june <- results_cmt_july_june %>%
+  filter(!is.na(padj))
+results_cmt_august_june <- results_cmt_august_june %>%
+  filter(!is.na(padj))
+results_cmt_august_july <- results_cmt_august_july %>%
+  filter(!is.na(padj))
 ```
 
 DAF - July vs. June
