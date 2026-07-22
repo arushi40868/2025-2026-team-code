@@ -1,0 +1,1629 @@
+---
+title: "Sophie Counts: DESeq2 VST and WGCNA Environmental Analysis"
+author: "Arushi Singh"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+    toc: true
+    toc_depth: 3
+---
+
+# Purpose
+
+This file performs only the steps needed before module-level regression:
+
+1.  Load Sophie's raw featureCounts matrix.
+2.  Build a DESeq2 object and calculate variance-stabilized expression values.
+3.  Select the most variable genes and construct a WGCNA network.
+4.  Calculate sample-level and six-event-level module eigengenes.
+5.  Join the final spline-filled environmental matrix.
+6.  Generate the expanded module-trait correlation heatmap and save all regression-ready outputs.
+
+No PCA, differential-expression testing, GO enrichment, or regression is run here.
+
+# 0. One-time environmental export
+
+Run the following **once in the R session containing your final spline-filled environmental object**. Confirm that the object contains six rows and the required variables before exporting it.
+
+```{r}
+environmental_events_7d <- readr::read_csv(
+  environmental_output_path,
+  show_col_types = FALSE
+)
+```
+
+```{r export-environment-once, eval=FALSE}
+environmental_output_path <- paste0(
+  "/work/clh162/Data+/Arushi/2025-2026-team-code/",
+  "Data+_team/Arushi/scripts/",
+  "environmental_events_7day_spline_final.csv"
+)
+
+required_environment_columns <- c(
+  "event_id",
+  "location",
+  "month",
+  "temperature_7d_mean",
+  "DO_7d_mean",
+  "salinity_7d_spline_mean",
+  "conductivity_7d_spline_mean",
+  "pH_7d_available_mean",
+  "precipitation_7d_total_mm"
+)
+
+stopifnot(
+  nrow(environmental_events_7d) == 6,
+  all(required_environment_columns %in% names(environmental_events_7d))
+)
+
+readr::write_csv(
+  environmental_events_7d,
+  environmental_output_path
+)
+```
+
+# 1. Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(DESeq2)
+library(WGCNA)
+library(tidyverse)
+library(matrixStats)
+library(pheatmap)
+
+options(stringsAsFactors = FALSE)
+allowWGCNAThreads()
+set.seed(2026)
+```
+
+```{r paths}
+sophie_count_file <- paste0(
+  "/work/clh162/Data+/Sophie/",
+  "2025-2026-team-code-sac165/",
+  "Data+_team/Sophie/gene_counts/gene_counts.csv"
+)
+
+environment_file <- paste0(
+  "/work/clh162/Data+/Arushi/2025-2026-team-code/",
+  "Data+_team/Arushi/scripts/",
+  "environmental_events_7day_spline_final.csv"
+)
+
+output_directory <- paste0(
+  "/work/clh162/Data+/Arushi/2025-2026-team-code/",
+  "Data+_team/Arushi/scripts/",
+  "SophieCounts_WGCNA"
+)
+
+dir.create(output_directory, recursive = TRUE, showWarnings = FALSE)
+
+stopifnot(
+  file.exists(sophie_count_file),
+  file.exists(environment_file)
+)
+```
+
+# 2. Load and prepare Sophie's raw counts
+
+```{r load-sophie-counts}
+sophie_raw <- readr::read_csv(
+  sophie_count_file,
+  comment = "#",
+  name_repair = "minimal",
+  show_col_types = FALSE,
+  trim_ws = TRUE
+)
+
+dim(sophie_raw)
+names(sophie_raw)[1:8]
+```
+
+```{r identify-columns}
+sophie_gene_candidates <- intersect(
+  c("Geneid", "gene_id", "GeneID", "gene", "Gene"),
+  names(sophie_raw)
+)
+
+if (length(sophie_gene_candidates) == 0) {
+  stop("No gene-ID column was detected in Sophie's count file.")
+}
+
+sophie_gene_column <- sophie_gene_candidates[1]
+
+sophie_sample_columns <- grep(
+  "(CMT|DAF)_SJ[123]_",
+  names(sophie_raw),
+  value = TRUE
+)
+
+stopifnot(
+  length(sophie_sample_columns) == 18,
+  !anyDuplicated(sophie_sample_columns)
+)
+
+sophie_gene_column
+length(sophie_sample_columns)
+```
+
+```{r clean-sample-names}
+clean_sample_id <- function(sample_name) {
+  sample_name %>%
+    basename() %>%
+    stringr::str_remove("\\.bam$") %>%
+    stringr::str_remove("_sorted$") %>%
+    stringr::str_remove("_S[0-9]+_L[0-9]+$") %>%
+    stringr::str_remove("_S[0-9]+$") %>%
+    stringr::str_remove("_Gill$")
+}
+
+sample_name_map <- tibble(
+  original_sample_name = sophie_sample_columns,
+  sample_id = clean_sample_id(sophie_sample_columns)
+)
+
+stopifnot(n_distinct(sample_name_map$sample_id) == 18)
+
+sample_name_map
+```
+
+```{r build-count-matrix}
+count_matrix_sophie <- as.matrix(
+  sophie_raw[, sophie_sample_columns, drop = FALSE]
+)
+
+storage.mode(count_matrix_sophie) <- "numeric"
+
+rownames(count_matrix_sophie) <- trimws(
+  as.character(sophie_raw[[sophie_gene_column]])
+)
+
+colnames(count_matrix_sophie) <- sample_name_map$sample_id
+
+stopifnot(
+  nrow(count_matrix_sophie) == 28538,
+  ncol(count_matrix_sophie) == 18,
+  !anyNA(count_matrix_sophie),
+  all(count_matrix_sophie >= 0),
+  all(count_matrix_sophie %% 1 == 0),
+  !anyDuplicated(rownames(count_matrix_sophie)),
+  !anyDuplicated(colnames(count_matrix_sophie))
+)
+
+storage.mode(count_matrix_sophie) <- "integer"
+
+dim(count_matrix_sophie)
+```
+
+# 3. Construct sample metadata
+
+```{r sample-metadata}
+sample_metadata_sophie <- tibble(
+  sample_id = colnames(count_matrix_sophie)
+) %>%
+  tidyr::separate(
+    sample_id,
+    into = c("location", "oyster_id", "collection_code"),
+    sep = "_",
+    remove = FALSE
+  ) %>%
+  mutate(
+    date_collected = lubridate::dmy(collection_code),
+    month = factor(format(date_collected, "%b"), levels = c("Jun", "Jul", "Aug")),
+    location = factor(location, levels = c("CMT", "DAF")),
+    station = if_else(location == "CMT", "CMAST", "DUML"),
+    event_id = paste0(as.character(location), "_", format(date_collected, "%Y%m%d"))
+  ) %>%
+  arrange(date_collected, location, oyster_id) %>%
+  as.data.frame()
+
+rownames(sample_metadata_sophie) <- sample_metadata_sophie$sample_id
+
+count_matrix_sophie <- count_matrix_sophie[
+  , sample_metadata_sophie$sample_id, drop = FALSE
+]
+
+stopifnot(
+  identical(colnames(count_matrix_sophie), rownames(sample_metadata_sophie)),
+  n_distinct(sample_metadata_sophie$event_id) == 6,
+  all(table(sample_metadata_sophie$event_id) == 3)
+)
+
+sample_metadata_sophie
+```
+
+# 4. DESeq2 filtering and variance-stabilizing transformation
+
+A full differential-expression model is not needed in this file. We create the DESeq2 object, remove very low-count genes, and calculate variance-stabilized expression values for WGCNA.
+
+```{r deseq2-object}
+dds_sophie <- DESeqDataSetFromMatrix(
+  countData = count_matrix_sophie,
+  colData = as.data.frame(sample_metadata_sophie),
+  design = ~ location + month
+)
+
+keep_gene <- rowSums(counts(dds_sophie) >= 10) >= 3
+
+dds_sophie <- dds_sophie[keep_gene, ]
+
+c(
+  genes_before_filtering = nrow(count_matrix_sophie),
+  genes_after_filtering = nrow(dds_sophie)
+)
+```
+
+```{r vst}
+vst_sophie <- vst(dds_sophie, blind = TRUE)
+vst_matrix_sophie <- assay(vst_sophie)
+
+stopifnot(
+  identical(colnames(vst_matrix_sophie), rownames(sample_metadata_sophie)),
+  !anyNA(vst_matrix_sophie)
+)
+
+dim(vst_matrix_sophie)
+```
+
+```{r save-deseq-objects}
+saveRDS(
+  dds_sophie,
+  file.path(output_directory, "SophieCounts_deseq2_dds_filtered.rds")
+)
+
+saveRDS(
+  vst_sophie,
+  file.path(output_directory, "SophieCounts_deseq2_vst.rds")
+)
+```
+
+# 5. Select genes for WGCNA
+
+Use the top 5% of filtered genes by variance, matching the scale of the earlier exploratory WGCNA.
+
+```{r variable-gene-selection}
+gene_variance <- matrixStats::rowVars(vst_matrix_sophie)
+names(gene_variance) <- rownames(vst_matrix_sophie)
+
+number_of_wgcna_genes <- ceiling(length(gene_variance) * 0.05)
+
+selected_wgcna_genes <- names(
+  sort(gene_variance, decreasing = TRUE)
+)[seq_len(number_of_wgcna_genes)]
+
+datExpr_sophie <- t(
+  vst_matrix_sophie[selected_wgcna_genes, , drop = FALSE]
+)
+
+dim(datExpr_sophie)
+```
+
+```{r good-samples-genes}
+good_expression_check <- goodSamplesGenes(datExpr_sophie, verbose = 3)
+
+if (!good_expression_check$allOK) {
+  datExpr_sophie <- datExpr_sophie[
+    good_expression_check$goodSamples,
+    good_expression_check$goodGenes,
+    drop = FALSE
+  ]
+}
+
+stopifnot(
+  nrow(datExpr_sophie) == 18,
+  identical(rownames(datExpr_sophie), rownames(sample_metadata_sophie)),
+  !anyNA(datExpr_sophie)
+)
+
+dim(datExpr_sophie)
+```
+
+# 6. Select a soft-thresholding power
+
+```{r soft-threshold}
+candidate_powers <- c(1:10, seq(12, 30, by = 2))
+
+soft_threshold_results <- pickSoftThreshold(
+  datExpr_sophie,
+  powerVector = candidate_powers,
+  networkType = "signed",
+  corFnc = "cor",
+  verbose = 5
+)
+
+soft_fit_table <- as_tibble(
+  soft_threshold_results$fitIndices
+) %>%
+  transmute(
+    power = Power,
+    signed_scale_free_R2 = -sign(slope) * SFT.R.sq,
+    mean_connectivity = mean.k.
+  )
+
+eligible_power <- soft_fit_table %>%
+  filter(signed_scale_free_R2 >= 0.80) %>%
+  slice_min(power, n = 1, with_ties = FALSE)
+
+if (nrow(eligible_power) == 1) {
+  soft_power <- eligible_power$power
+} else {
+  soft_power <- soft_fit_table %>%
+    slice_max(signed_scale_free_R2, n = 1, with_ties = FALSE) %>%
+    pull(power)
+}
+
+soft_fit_table
+soft_power
+```
+
+# 7. Construct the WGCNA network
+
+```{r wgcna-network}
+network_sophie <- blockwiseModules(
+  datExpr_sophie,
+  power = soft_power,
+  networkType = "signed",
+  TOMType = "signed",
+  minModuleSize = 30,
+  deepSplit = 2,
+  mergeCutHeight = 0.25,
+  pamRespectsDendro = FALSE,
+  numericLabels = FALSE,
+  reassignThreshold = 0,
+  maxBlockSize = ncol(datExpr_sophie),
+  saveTOMs = FALSE,
+  verbose = 3
+)
+
+# Extract module assignments from the completed WGCNA network
+module_colors_sophie <- network_sophie$colors
+
+# Convert to a simple character vector if WGCNA returned a list-like object
+if (is.list(module_colors_sophie)) {
+  module_colors_sophie <- unlist(
+    module_colors_sophie,
+    recursive = TRUE,
+    use.names = FALSE
+  )
+}
+
+module_colors_sophie <- as.character(
+  module_colors_sophie
+)
+
+# Each WGCNA gene should have exactly one module assignment
+stopifnot(
+  length(module_colors_sophie) == ncol(datExpr_sophie),
+  !anyNA(module_colors_sophie)
+)
+
+names(module_colors_sophie) <- colnames(
+  datExpr_sophie
+)
+
+# Create module-size summary
+module_size_table <- tibble::tibble(
+  module = module_colors_sophie
+) %>%
+  dplyr::group_by(module) %>%
+  dplyr::summarise(
+    number_of_genes = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(number_of_genes)
+  )
+
+module_size_table
+```
+
+```{r module-gene-table}
+module_gene_table_sophie <- tibble(
+  gene_id = names(module_colors_sophie),
+  module = unname(module_colors_sophie)
+)
+
+readr::write_csv(
+  module_gene_table_sophie,
+  file.path(output_directory, "SophieCounts_WGCNA_gene_modules.csv")
+)
+
+readr::write_csv(
+  module_size_table,
+  file.path(output_directory, "SophieCounts_WGCNA_module_sizes.csv")
+)
+```
+
+# 8. Calculate module eigengenes
+
+The grey module is excluded because it contains unassigned genes.
+
+```{r module-eigengenes}
+non_grey_genes <- module_colors_sophie != "grey"
+
+datExpr_modules_sophie <- datExpr_sophie[
+  , non_grey_genes, drop = FALSE
+]
+
+module_colors_non_grey <- module_colors_sophie[non_grey_genes]
+
+module_eigengenes_sophie <- moduleEigengenes(
+  datExpr_modules_sophie,
+  colors = module_colors_non_grey
+)$eigengenes
+
+module_eigengenes_sophie <- orderMEs(module_eigengenes_sophie)
+
+stopifnot(
+  identical(
+    rownames(module_eigengenes_sophie),
+    rownames(sample_metadata_sophie)
+  )
+)
+
+dim(module_eigengenes_sophie)
+names(module_eigengenes_sophie)
+```
+
+```{r sample-level-eigengenes}
+sample_level_eigengenes_sophie <- bind_cols(
+  sample_metadata_sophie %>%
+    rownames_to_column(var = "metadata_rowname") %>%
+    select(-metadata_rowname),
+  as_tibble(module_eigengenes_sophie)
+)
+
+readr::write_csv(
+  sample_level_eigengenes_sophie,
+  file.path(output_directory, "SophieCounts_WGCNA_sample_level_eigengenes.csv")
+)
+
+saveRDS(
+  module_eigengenes_sophie,
+  file.path(output_directory, "SophieCounts_WGCNA_sample_level_eigengenes.rds")
+)
+```
+
+# 9. Collapse eigengenes to six independent collection events
+
+```{r event-level-eigengenes}
+eigengene_columns <- grep(
+  "^ME",
+  names(sample_level_eigengenes_sophie),
+  value = TRUE
+)
+
+event_level_eigengenes_sophie <- sample_level_eigengenes_sophie %>%
+  group_by(event_id, location, station, month, date_collected) %>%
+  summarise(
+    across(all_of(eigengene_columns), mean),
+    RNAseq_samples = n(),
+    .groups = "drop"
+  ) %>%
+  arrange(date_collected, location)
+
+stopifnot(
+  nrow(event_level_eigengenes_sophie) == 6,
+  all(event_level_eigengenes_sophie$RNAseq_samples == 3)
+)
+
+event_level_eigengenes_sophie
+```
+
+```{r save-event-eigengenes}
+readr::write_csv(
+  event_level_eigengenes_sophie,
+  file.path(output_directory, "SophieCounts_WGCNA_event_level_eigengenes.csv")
+)
+
+saveRDS(
+  event_level_eigengenes_sophie,
+  file.path(output_directory, "SophieCounts_WGCNA_event_level_eigengenes.rds")
+)
+```
+
+```{r}
+ls(pattern = "environment")
+```
+
+# 10. Load and join the final environmental matrix
+
+```{r}
+# Confirm the source table has the expected columns
+names(environmental_events_7d)
+
+# Create the finalized event-level environmental table
+environmental_events_final <-
+  environmental_events_7d %>%
+  dplyr::mutate(
+    location = trimws(as.character(location)),
+    date_collected = as.Date(date_collected),
+    event_id = paste0(
+      location,
+      "_",
+      format(date_collected, "%Y%m%d")
+    )
+  ) %>%
+  dplyr::relocate(
+    event_id,
+    .before = location
+  )
+
+# Preview the result
+environmental_events_final
+```
+
+```{r}
+missing_required_columns <- setdiff(
+  required_environment_columns,
+  names(environmental_events_final)
+)
+
+available_environment_columns <- names(
+  environmental_events_final
+)
+
+missing_required_columns
+available_environment_columns
+```
+
+```{r}
+grep(
+  "salinity|conductivity",
+  names(environmental_events_final),
+  value = TRUE,
+  ignore.case = TRUE
+)
+```
+
+```{r}
+# Inspect relevant environmental columns
+grep(
+  "salinity|conductivity",
+  names(environmental_events_final),
+  value = TRUE,
+  ignore.case = TRUE
+)
+
+# Rename only when the older column names actually exist
+if (
+  "salinity_7d_available_mean" %in% names(environmental_events_final) &&
+  !"salinity_7d_spline_mean" %in% names(environmental_events_final)
+) {
+  environmental_events_final <-
+    environmental_events_final %>%
+    dplyr::rename(
+      salinity_7d_spline_mean = salinity_7d_available_mean
+    )
+}
+
+if (
+  "conductivity_7d_available_mean" %in% names(environmental_events_final) &&
+  !"conductivity_7d_spline_mean" %in% names(environmental_events_final)
+) {
+  environmental_events_final <-
+    environmental_events_final %>%
+    dplyr::rename(
+      conductivity_7d_spline_mean = conductivity_7d_available_mean
+    )
+}
+
+# Confirm final column names
+grep(
+  "salinity|conductivity",
+  names(environmental_events_final),
+  value = TRUE,
+  ignore.case = TRUE
+)
+```
+
+```{r}
+setdiff(
+  required_environment_columns,
+  names(environmental_events_final)
+)
+```
+
+```{r}
+readr::write_csv(
+  environmental_events_final,
+  environment_file
+)
+```
+
+```{r join-environment}
+wgcna_environment_sophie <- event_level_eigengenes_sophie %>%
+  left_join(
+    environmental_events_final %>%
+      select(-any_of(c("location", "month", "station", "date_collected"))),
+    by = "event_id"
+  )
+
+stopifnot(
+  nrow(wgcna_environment_sophie) == 6,
+  n_distinct(wgcna_environment_sophie$event_id) == 6
+)
+
+readr::write_csv(
+  wgcna_environment_sophie,
+  file.path(output_directory, "SophieCounts_WGCNA_environment_joined.csv")
+)
+
+wgcna_environment_sophie
+
+
+```
+
+# 11. Build the expanded trait matrix
+
+```{r trait-matrix}
+# Create the trait data table
+trait_data_sophie <- wgcna_environment_sophie %>%
+  dplyr::transmute(
+    event_id = as.character(event_id),
+
+    temperature_7d_mean,
+    DO_7d_mean,
+    salinity_7d_spline_mean,
+    conductivity_7d_spline_mean,
+    pH_7d_available_mean,
+    precipitation_7d_total_mm,
+
+    month_Jun = as.integer(month == "Jun"),
+    month_Jul = as.integer(month == "Jul"),
+    month_Aug = as.integer(month == "Aug"),
+
+    location_DAF = as.integer(location == "DAF")
+  )
+
+# Convert only numeric trait columns to a matrix
+trait_matrix_sophie <- trait_data_sophie %>%
+  dplyr::select(-event_id) %>%
+  as.matrix()
+
+# Assign event IDs AFTER conversion to matrix
+rownames(trait_matrix_sophie) <-
+  trait_data_sophie$event_id
+```
+
+```{r}
+eigengene_matrix_event_sophie <-
+  wgcna_environment_sophie %>%
+  dplyr::select(
+    dplyr::all_of(eigengene_columns)
+  ) %>%
+  as.matrix()
+
+rownames(eigengene_matrix_event_sophie) <-
+  as.character(
+    wgcna_environment_sophie$event_id
+  )
+```
+
+```{r}
+trait_matrix_sophie <-
+  trait_matrix_sophie[
+    rownames(eigengene_matrix_event_sophie),
+    ,
+    drop = FALSE
+  ]
+```
+
+```{r}
+rownames(eigengene_matrix_event_sophie)
+rownames(trait_matrix_sophie)
+
+identical(
+  rownames(eigengene_matrix_event_sophie),
+  rownames(trait_matrix_sophie)
+)
+```
+
+```{r}
+dim(eigengene_matrix_event_sophie)
+dim(trait_matrix_sophie)
+
+sum(is.na(eigengene_matrix_event_sophie))
+colSums(is.na(trait_matrix_sophie))
+```
+
+# 12. Module-trait correlations, p-values, and FDR
+
+```{r correlation-functions}
+pairwise_correlation_results <- function(eigengene_matrix, trait_matrix) {
+  output <- vector(
+    "list",
+    ncol(eigengene_matrix) * ncol(trait_matrix)
+  )
+
+  result_number <- 1
+
+  for (module_name in colnames(eigengene_matrix)) {
+    for (trait_name in colnames(trait_matrix)) {
+      module_values <- eigengene_matrix[, module_name]
+      trait_values <- trait_matrix[, trait_name]
+
+      complete_rows <- complete.cases(module_values, trait_values)
+      n_complete <- sum(complete_rows)
+
+      if (
+        n_complete >= 3 &&
+        sd(module_values[complete_rows]) > 0 &&
+        sd(trait_values[complete_rows]) > 0
+      ) {
+        test_result <- cor.test(
+          module_values[complete_rows],
+          trait_values[complete_rows],
+          method = "pearson"
+        )
+
+        correlation_value <- unname(test_result$estimate)
+        p_value <- test_result$p.value
+      } else {
+        correlation_value <- NA_real_
+        p_value <- NA_real_
+      }
+
+      output[[result_number]] <- tibble(
+        module = module_name,
+        trait = trait_name,
+        correlation = correlation_value,
+        n_events = n_complete,
+        p_value = p_value
+      )
+
+      result_number <- result_number + 1
+    }
+  }
+
+  bind_rows(output) %>%
+    mutate(
+      FDR = p.adjust(p_value, method = "BH"),
+      absolute_correlation = abs(correlation)
+    )
+}
+```
+
+```{r module-trait-results}
+module_trait_results_sophie <- pairwise_correlation_results(
+  eigengene_matrix_event_sophie,
+  trait_matrix_sophie
+) %>%
+  arrange(FDR, p_value, desc(absolute_correlation))
+
+readr::write_csv(
+  module_trait_results_sophie,
+  file.path(
+    output_directory,
+    "SophieCounts_WGCNA_expanded_module_trait_results.csv"
+  )
+)
+
+module_trait_results_sophie %>%
+  slice_head(n = 25)
+```
+
+# 13. Expanded WGCNA heatmap
+
+```{r heatmap-labels}
+module_order <- colnames(eigengene_matrix_event_sophie)
+trait_order <- colnames(trait_matrix_sophie)
+
+correlation_matrix <- matrix(
+  NA_real_,
+  nrow = length(module_order),
+  ncol = length(trait_order),
+  dimnames = list(module_order, trait_order)
+)
+
+heatmap_text_matrix <- matrix(
+  "",
+  nrow = length(module_order),
+  ncol = length(trait_order),
+  dimnames = list(module_order, trait_order)
+)
+
+for (row_number in seq_len(nrow(module_trait_results_sophie))) {
+  result_row <- module_trait_results_sophie[row_number, ]
+
+  module_name <- result_row$module
+  trait_name <- result_row$trait
+
+  correlation_matrix[module_name, trait_name] <- result_row$correlation
+
+  significance_symbol <- case_when(
+    !is.na(result_row$FDR) && result_row$FDR < 0.05 ~ "**",
+    !is.na(result_row$p_value) && result_row$p_value < 0.05 ~ "*",
+    TRUE ~ ""
+  )
+
+  p_text <- case_when(
+    is.na(result_row$p_value) ~ "p=NA",
+    result_row$p_value < 0.001 ~ "p=<0.001",
+    TRUE ~ paste0(
+      "p=",
+      formatC(result_row$p_value, format = "f", digits = 3)
+    )
+  )
+
+  heatmap_text_matrix[module_name, trait_name] <- paste0(
+    formatC(result_row$correlation, format = "f", digits = 2),
+    significance_symbol,
+    "\n",
+    p_text,
+    "\n",
+    "n=",
+    result_row$n_events
+  )
+}
+```
+
+```{r save-heatmap, fig.width=14, fig.height=8}
+trait_display_names <- c(
+  temperature_7d_mean = "Temperature",
+  DO_7d_mean = "Dissolved oxygen",
+  salinity_7d_spline_mean = "Salinity\n(spline)",
+  conductivity_7d_spline_mean = "Conductivity\n(spline)",
+  pH_7d_available_mean = "pH\n(available)",
+  precipitation_7d_total_mm = "Precipitation",
+  month_Jun = "June",
+  month_Jul = "July",
+  month_Aug = "August",
+  location_DAF = "Location\nDAF vs CMT"
+)
+
+colnames(correlation_matrix) <- trait_display_names[
+  colnames(correlation_matrix)
+]
+
+colnames(heatmap_text_matrix) <- colnames(correlation_matrix)
+
+heatmap_file <- file.path(
+  output_directory,
+  "SophieCounts_WGCNA_expanded_module_trait_heatmap.pdf"
+)
+
+pdf(
+  heatmap_file,
+  width = 14,
+  height = max(7, 0.72 * nrow(correlation_matrix) + 2)
+)
+
+pheatmap(
+  correlation_matrix,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  display_numbers = heatmap_text_matrix,
+  number_color = "black",
+  fontsize_number = 9,
+  fontsize_row = 11,
+  fontsize_col = 11,
+  angle_col = 45,
+  breaks = seq(-1, 1, length.out = 101),
+  main = paste0(
+    "Sophie-count WGCNA: expanded module-trait correlations\n",
+    "* nominal p < 0.05; ** BH-FDR < 0.05"
+  ),
+  border_color = "grey80"
+)
+
+dev.off()
+
+heatmap_file
+```
+
+# 14. Save core objects
+
+```{r save-core-objects}
+core_wgcna_objects_sophie <- list(
+  count_source = sophie_count_file,
+  environmental_source = environment_file,
+  gene_filter = "Count >= 10 in at least 3 samples",
+  variable_gene_fraction = 0.05,
+  selected_soft_power = soft_power,
+  selected_wgcna_genes = selected_wgcna_genes,
+  network = network_sophie,
+  module_colors = module_colors_sophie,
+  sample_metadata = sample_metadata_sophie,
+  sample_level_eigengenes = sample_level_eigengenes_sophie,
+  event_level_eigengenes = event_level_eigengenes_sophie,
+  joined_environment = wgcna_environment_sophie,
+  module_trait_results = module_trait_results_sophie
+)
+
+saveRDS(
+  core_wgcna_objects_sophie,
+  file.path(output_directory, "SophieCounts_WGCNA_core_objects.rds")
+)
+```
+
+# 15. Final checks
+
+```{r final-checks}
+final_output_summary <- tibble(
+  item = c(
+    "Raw genes",
+    "Filtered genes",
+    "WGCNA genes",
+    "RNA-seq samples",
+    "Independent events",
+    "Non-grey modules",
+    "Environmental traits",
+    "Selected soft power"
+  ),
+  value = c(
+    nrow(count_matrix_sophie),
+    nrow(dds_sophie),
+    ncol(datExpr_sophie),
+    nrow(datExpr_sophie),
+    nrow(event_level_eigengenes_sophie),
+    ncol(module_eigengenes_sophie),
+    ncol(trait_matrix_sophie),
+    soft_power
+  )
+)
+
+final_output_summary
+```
+
+```{r regression-ready-files}
+list.files(output_directory, full.names = TRUE)
+```
+
+The files most important for tomorrow's regression work are:
+
+-   `SophieCounts_WGCNA_event_level_eigengenes.csv`
+-   `SophieCounts_WGCNA_environment_joined.csv`
+-   `SophieCounts_WGCNA_expanded_module_trait_results.csv`
+-   `SophieCounts_WGCNA_expanded_module_trait_heatmap.pdf`
+-   `SophieCounts_WGCNA_gene_modules.csv`
+-   `SophieCounts_WGCNA_core_objects.rds`
+
+```{r session-info}
+writeLines(
+  capture.output(sessionInfo()),
+  file.path(output_directory, "SophieCounts_WGCNA_sessionInfo.txt")
+)
+```
+
+**NEW WGCNA GRAPH**
+
+```{r}
+library(tidyverse)
+library(patchwork)
+
+# ------------------------------------------------------------
+# 1. Preserve the module and environmental-trait ordering
+# ------------------------------------------------------------
+
+module_order <- colnames(eigengene_matrix_event_sophie)
+trait_order <- colnames(trait_matrix_sophie)
+
+trait_display_names <- c(
+  temperature_7d_mean = "Temperature",
+  DO_7d_mean = "Dissolved oxygen",
+  salinity_7d_spline_mean = "Salinity\n(spline)",
+  conductivity_7d_spline_mean = "Conductivity\n(spline)",
+  pH_7d_available_mean = "pH\n(available)",
+  precipitation_7d_total_mm = "Precipitation",
+  month_Jun = "June",
+  month_Jul = "July",
+  month_Aug = "August",
+  location_DAF = "Location\nDAF vs CMT"
+)
+
+# ------------------------------------------------------------
+# 2. Prepare module-trait results
+# ------------------------------------------------------------
+
+plot_data <- module_trait_results_sophie %>%
+  mutate(
+    # Reverse levels so the first module appears at the top
+    module = factor(
+      module,
+      levels = rev(module_order)
+    ),
+
+    trait = factor(
+      trait,
+      levels = trait_order
+    ),
+
+    # Label only nominally significant relationships
+    significant = !is.na(p_value) & p_value < 0.05,
+
+    p_display = case_when(
+      is.na(p_value) ~ "NA",
+      p_value < 0.001 ~ "<0.001",
+      TRUE ~ formatC(
+        p_value,
+        format = "f",
+        digits = 3
+      )
+    ),
+
+    cell_label = if_else(
+      significant,
+      paste0(
+        formatC(
+          correlation,
+          format = "f",
+          digits = 2
+        ),
+        "\n(p=",
+        p_display,
+        ")"
+      ),
+      ""
+    )
+  )
+```
+
+```{r}
+module_count_plot_data <- module_size_table %>%
+  filter(module != "grey") %>%
+  mutate(
+    module_ME = paste0("ME", module),
+
+    module_ME = factor(
+      module_ME,
+      levels = rev(module_order)
+    )
+  ) %>%
+  filter(!is.na(module_ME))
+```
+
+```{r}
+correlation_heatmap <- ggplot(
+  plot_data,
+  aes(
+    x = trait,
+    y = module,
+    fill = correlation
+  )
+) +
+  geom_tile(
+    color = "grey85",
+    linewidth = 0.6
+  ) +
+  geom_text(
+    aes(label = cell_label),
+    size = 3.8,
+    fontface = "bold",
+    lineheight = 0.9
+  ) +
+  scale_fill_gradient2(
+    low = "#2166AC",
+    mid = "white",
+    high = "#D73027",
+    midpoint = 0,
+    limits = c(-1, 1),
+    name = "Correlation"
+  ) +
+  scale_x_discrete(
+    labels = trait_display_names,
+    drop = FALSE
+  ) +
+  scale_y_discrete(
+    drop = FALSE
+  ) +
+  labs(
+    title = "WGCNA module-trait correlations",
+    subtitle = "Labels shown only for nominal p < 0.05",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1,
+      vjust = 1,
+      size = 10
+    ),
+
+    axis.text.y = element_text(
+      size = 11
+    ),
+
+    plot.title = element_text(
+      face = "bold"
+    ),
+
+    legend.position = "left",
+
+    plot.margin = margin(
+      t = 5,
+      r = 5,
+      b = 5,
+      l = 5
+    )
+  )
+```
+
+```{r}
+gene_count_plot <- ggplot(
+  module_count_plot_data,
+  aes(
+    x = number_of_genes,
+    y = module_ME
+  )
+) +
+  geom_col(
+    aes(fill = module),
+    width = 0.72,
+    show.legend = FALSE
+  ) +
+  scale_fill_identity() +
+  geom_text(
+    aes(
+      label = scales::comma(number_of_genes)
+    ),
+    hjust = -0.15,
+    size = 4
+  ) +
+  scale_y_discrete(
+    drop = FALSE
+  ) +
+  scale_x_continuous(
+    limits = c(
+      0,
+      max(module_count_plot_data$number_of_genes) * 1.4
+    ),
+    expand = expansion(mult = c(0, 0))
+  ) +
+  labs(
+    title = "Number of genes",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+
+    plot.title = element_text(
+      face = "bold",
+      hjust = 0.5,
+      size = 12
+    ),
+
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+
+    plot.margin = margin(
+      t = 5,
+      r = 10,
+      b = 5,
+      l = 0
+    )
+  )
+```
+
+```{r}
+final_wgcna_plot <-
+  correlation_heatmap +
+  gene_count_plot +
+  plot_layout(
+    widths = c(5.5, 1.4)
+  )
+
+final_wgcna_plot
+
+ggsave(
+  filename = file.path(
+    output_directory,
+    "SophieCounts_WGCNA_significant_correlations_with_gene_counts.png"
+  ),
+  plot = final_wgcna_plot,
+  width = 16,
+  height = 7,
+  dpi = 300,
+  bg = "white"
+)
+```
+
+```{r}
+library(tidyverse)
+library(patchwork)
+
+# ------------------------------------------------------------
+# 1. Preserve original order
+# ------------------------------------------------------------
+module_order <- colnames(eigengene_matrix_event_sophie)
+trait_order  <- colnames(trait_matrix_sophie)
+
+trait_display_names <- c(
+  temperature_7d_mean = "Temperature",
+  DO_7d_mean = "Dissolved oxygen",
+  salinity_7d_spline_mean = "Salinity\n(spline)",
+  conductivity_7d_spline_mean = "Conductivity\n(spline)",
+  pH_7d_available_mean = "pH\n(available)",
+  precipitation_7d_total_mm = "Precipitation",
+  month_Jun = "June",
+  month_Jul = "July",
+  month_Aug = "August",
+  location_DAF = "Location\nDAF vs CMT"
+)
+
+# ------------------------------------------------------------
+# 2. Keep only traits with at least one significant correlation
+# ------------------------------------------------------------
+significant_traits <- module_trait_results_sophie %>%
+  group_by(trait) %>%
+  summarise(
+    has_sig = any(!is.na(p_value) & p_value < 0.05),
+    .groups = "drop"
+  ) %>%
+  filter(has_sig) %>%
+  pull(trait)
+
+# preserve the original left-to-right order
+significant_traits <- trait_order[trait_order %in% significant_traits]
+
+# ------------------------------------------------------------
+# 3. Prepare plotting data
+# ------------------------------------------------------------
+plot_data <- module_trait_results_sophie %>%
+  filter(trait %in% significant_traits) %>%
+  mutate(
+    module = factor(module, levels = rev(module_order)),
+    trait  = factor(trait, levels = significant_traits),
+    significant = !is.na(p_value) & p_value < 0.05,
+
+    p_display = case_when(
+      is.na(p_value) ~ "NA",
+      p_value < 0.001 ~ "<0.001",
+      TRUE ~ formatC(p_value, format = "f", digits = 3)
+    ),
+
+    cell_label = if_else(
+      significant,
+      paste0(
+        formatC(correlation, format = "f", digits = 2),
+        "\n(p=", p_display, ")"
+      ),
+      ""
+    )
+  )
+```
+
+```{r}
+module_count_plot_data <- module_size_table %>%
+  filter(module != "grey") %>%
+  mutate(
+    module_ME = paste0("ME", module),
+    module_ME = factor(module_ME, levels = rev(module_order))
+  ) %>%
+  filter(!is.na(module_ME))
+```
+
+```{r}
+correlation_heatmap <- ggplot(
+  plot_data,
+  aes(
+    x = trait,
+    y = module,
+    fill = correlation
+  )
+) +
+  geom_tile(
+    color = "grey85",
+    linewidth = 0.6
+  ) +
+  geom_text(
+    aes(label = cell_label),
+    size = 3.8,
+    fontface = "bold",
+    lineheight = 0.9
+  ) +
+  scale_fill_gradient2(
+    low = "#2166AC",
+    mid = "white",
+    high = "#D73027",
+    midpoint = 0,
+    limits = c(-1, 1),
+    name = "Correlation"
+  ) +
+  scale_x_discrete(
+    labels = trait_display_names[significant_traits],
+    drop = FALSE
+  ) +
+  scale_y_discrete(drop = FALSE) +
+  labs(
+    title = "WGCNA module-trait correlations",
+    subtitle = "Only traits with at least one nominally significant correlation shown",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1,
+      vjust = 1,
+      size = 10
+    ),
+    axis.text.y = element_text(size = 11),
+    plot.title = element_text(face = "bold"),
+    legend.position = "left",
+    plot.margin = margin(5, 5, 5, 5)
+  )
+```
+
+```{r}
+gene_count_plot <- ggplot(
+  module_count_plot_data,
+  aes(
+    x = number_of_genes,
+    y = module_ME
+  )
+) +
+  geom_col(
+    aes(fill = module),
+    width = 0.72,
+    show.legend = FALSE
+  ) +
+  scale_fill_identity() +
+  geom_text(
+    aes(label = scales::comma(number_of_genes)),
+    hjust = -0.15,
+    size = 4
+  ) +
+  scale_y_discrete(drop = FALSE) +
+  scale_x_continuous(
+    limits = c(0, max(module_count_plot_data$number_of_genes) * 1.4),
+    expand = expansion(mult = c(0, 0))
+  ) +
+  labs(
+    title = "Number of genes",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 12),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    plot.margin = margin(5, 10, 5, 0)
+  )
+```
+
+```{r}
+final_wgcna_plot <-
+  correlation_heatmap +
+  gene_count_plot +
+  plot_layout(widths = c(5.5, 1.4))
+
+final_wgcna_plot
+
+ggsave(
+  filename = file.path(
+    output_directory,
+    "SophieCounts_WGCNA_significant_traits_only.png"
+  ),
+  plot = final_wgcna_plot,
+  width = 13,
+  height = 7,
+  dpi = 300,
+  bg = "white"
+)
+```
+
+```{r}
+focus_modules <- c("MEblack", "MEyellow", "MEgreen")
+```
+
+```{r}
+plot_data <- module_trait_results_sophie %>%
+  filter(trait %in% significant_traits) %>%
+  mutate(
+    module = factor(module, levels = rev(module_order)),
+    trait  = factor(trait, levels = significant_traits),
+
+    highlight_module = module %in% focus_modules,
+
+    significant = !is.na(p_value) & p_value < 0.05,
+
+    p_display = case_when(
+      is.na(p_value) ~ "NA",
+      p_value < 0.001 ~ "<0.001",
+      TRUE ~ formatC(p_value, format = "f", digits = 3)
+    ),
+
+    cell_label = if_else(
+      significant & highlight_module,
+      paste0(
+        formatC(correlation, format = "f", digits = 2),
+        "\n(p=", p_display, ")"
+      ),
+      ""
+    ),
+
+    # Only highlighted modules keep correlation colors;
+    # all others become NA and will be drawn in grey
+    fill_value = if_else(
+      highlight_module,
+      correlation,
+      NA_real_
+    )
+  )
+```
+
+```{r}
+correlation_heatmap <- ggplot(
+  plot_data,
+  aes(
+    x = trait,
+    y = module,
+    fill = fill_value
+  )
+) +
+  geom_tile(
+    color = "grey80",
+    linewidth = 0.6
+  ) +
+  geom_text(
+    aes(label = cell_label),
+    size = 3.8,
+    fontface = "bold",
+    lineheight = 0.9
+  ) +
+  scale_fill_gradient2(
+    low = "#2166AC",
+    mid = "white",
+    high = "#D73027",
+    midpoint = 0,
+    limits = c(-1, 1),
+    na.value = "grey85",
+    name = "Correlation"
+  ) +
+  scale_x_discrete(
+    labels = trait_display_names[significant_traits],
+    drop = FALSE
+  ) +
+  scale_y_discrete(drop = FALSE) +
+  labs(
+    title = "WGCNA module-trait correlations",
+    subtitle = "Highlighted modules: MEblack, MEyellow, and MEgreen",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1,
+      vjust = 1,
+      size = 10
+    ),
+    axis.text.y = element_text(size = 11),
+    plot.title = element_text(face = "bold"),
+    legend.position = "left",
+    plot.margin = margin(5, 5, 5, 5)
+  )
+```
+
+```{r}
+correlation_heatmap <- ggplot(
+  plot_data,
+  aes(
+    x = trait,
+    y = module,
+    fill = fill_value
+  )
+) +
+  geom_tile(
+    color = "grey80",
+    linewidth = 0.6
+  ) +
+  geom_text(
+    aes(label = cell_label),
+    size = 3.8,
+    fontface = "bold",
+    lineheight = 0.9
+  ) +
+  scale_fill_gradient2(
+    low = "#2166AC",
+    mid = "white",
+    high = "#D73027",
+    midpoint = 0,
+    limits = c(-1, 1),
+    na.value = "grey85",
+    name = "Correlation"
+  ) +
+  scale_x_discrete(
+    labels = trait_display_names[significant_traits],
+    drop = FALSE
+  ) +
+  scale_y_discrete(drop = FALSE) +
+  labs(
+    title = "WGCNA module-trait correlations",
+    subtitle = "Highlighted modules: MEblack, MEyellow, and MEgreen",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1,
+      vjust = 1,
+      size = 10
+    ),
+    axis.text.y = element_text(size = 11),
+    plot.title = element_text(face = "bold"),
+    legend.position = "left",
+    plot.margin = margin(5, 5, 5, 5)
+  )
+```
+
+```{r}
+module_count_plot_data <- module_size_table %>%
+  filter(module != "grey") %>%
+  mutate(
+    module_ME = paste0("ME", module),
+    module_ME = factor(module_ME, levels = rev(module_order)),
+    bar_fill = if_else(
+      module_ME %in% focus_modules,
+      module,
+      "grey80"
+    )
+  ) %>%
+  filter(!is.na(module_ME))
+```
+
+```{r}
+gene_count_plot <- ggplot(
+  module_count_plot_data,
+  aes(
+    x = number_of_genes,
+    y = module_ME
+  )
+) +
+  geom_col(
+    aes(fill = bar_fill),
+    width = 0.72,
+    show.legend = FALSE
+  ) +
+  scale_fill_identity() +
+  geom_text(
+    aes(label = scales::comma(number_of_genes)),
+    hjust = -0.15,
+    size = 4
+  ) +
+  scale_y_discrete(drop = FALSE) +
+  scale_x_continuous(
+    limits = c(0, max(module_count_plot_data$number_of_genes) * 1.4),
+    expand = expansion(mult = c(0, 0))
+  ) +
+  labs(
+    title = "Number of genes",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 12),
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    plot.margin = margin(5, 10, 5, 0)
+  )
+```
+
+```{r}
+final_wgcna_plot <-
+  correlation_heatmap +
+  gene_count_plot +
+  patchwork::plot_layout(
+    widths = c(5.5, 1.4)
+  )
+
+print(final_wgcna_plot)
+```

@@ -1,10 +1,13 @@
 ---
-title: "RNA Sequencing - Oysters"
+title: "Environmental Regression Analysis"
 output:
+  pdf_document:
+    latex_engine: xelatex
+    keep_tex: true
   html_document:
     df_print: paged
-  word_document: default
-  pdf_document: default
+geometry: margin=0.7in
+fontsize: 10pt
 ---
 
 **00 - File Check**
@@ -2709,4 +2712,2661 @@ writeLines(
 #found that month explains MEblack better than precipitation alone;
 
 #observed a potentially DAF-specific August increase that cannot yet be formally tested.
+```
+
+**Spline Fill**
+
+```{r}
+
+# ============================================================
+# Step 1: Find the cleaned daily environmental objects
+# ============================================================
+
+library(dplyr)
+library(zoo)
+
+all_object_names <- ls()
+
+daily_object_names <- all_object_names[
+  grepl(
+    "daily|salinity|conductivity|pH|environment",
+    all_object_names,
+    ignore.case = TRUE
+  )
+]
+
+daily_object_names
+```
+
+```{r}
+# Show the class and dimensions of the candidate objects
+
+daily_object_inventory <- do.call(
+  rbind,
+  lapply(
+    daily_object_names,
+    function(object_name) {
+
+      current_object <- get(object_name)
+
+      object_dimensions <- dim(current_object)
+
+      data.frame(
+        object = object_name,
+        class = paste(
+          class(current_object),
+          collapse = ", "
+        ),
+        rows = if (
+          is.null(object_dimensions)
+        ) {
+          length(current_object)
+        } else {
+          object_dimensions[1]
+        },
+        columns = if (
+          is.null(object_dimensions)
+        ) {
+          NA_integer_
+        } else {
+          object_dimensions[2]
+        },
+        stringsAsFactors = FALSE
+      )
+    }
+  )
+)
+
+daily_object_inventory
+```
+
+```{r}
+# ============================================================
+# Step 2: Inspect observed salinity/conductivity daily data
+# ============================================================
+
+names(salinity_daily)
+
+dplyr::glimpse(salinity_daily)
+
+head(
+  salinity_daily,
+  10
+)
+```
+
+```{r}
+salinity_daily %>%
+  dplyr::group_by(Farm) %>%
+  dplyr::summarise(
+    first_date = min(date, na.rm = TRUE),
+    last_date = max(date, na.rm = TRUE),
+    observed_days = dplyr::n_distinct(date),
+    rows = dplyr::n(),
+    duplicate_dates = sum(duplicated(date)),
+    .groups = "drop"
+  )
+```
+
+```{r}
+salinity_daily %>%
+  dplyr::summarise(
+    dplyr::across(
+      where(is.numeric),
+      ~ sum(is.na(.x))
+    )
+  )
+```
+
+```{r}
+# ============================================================
+# Step 3A. Create a complete daily calendar for each station
+# ============================================================
+
+library(dplyr)
+library(tidyr)
+
+salinity_spline_calendar <- salinity_daily %>%
+  dplyr::mutate(
+    date = as.Date(date)
+  ) %>%
+  dplyr::group_by(Farm) %>%
+  tidyr::complete(
+    date = seq(
+      min(date),
+      max(date),
+      by = "day"
+    )
+  ) %>%
+  dplyr::arrange(Farm, date) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    temperature_observed =
+      !is.na(temperature_daily_mean),
+
+    conductivity_observed =
+      !is.na(conductivity_daily_mean),
+
+    salinity_observed =
+      !is.na(salinity_daily_mean)
+  )
+
+dim(salinity_spline_calendar)
+
+head(
+  salinity_spline_calendar,
+  10
+)
+```
+
+```{r}
+spline_missing_summary <- salinity_spline_calendar %>%
+  dplyr::group_by(Farm) %>%
+  dplyr::summarise(
+    calendar_days = dplyr::n(),
+
+    temperature_observed_days =
+      sum(temperature_observed),
+
+    temperature_missing_days =
+      sum(!temperature_observed),
+
+    conductivity_observed_days =
+      sum(conductivity_observed),
+
+    conductivity_missing_days =
+      sum(!conductivity_observed),
+
+    salinity_observed_days =
+      sum(salinity_observed),
+
+    salinity_missing_days =
+      sum(!salinity_observed),
+
+    .groups = "drop"
+  )
+
+spline_missing_summary
+```
+
+```{r}
+# ============================================================
+# Identify consecutive missing-date runs
+# ============================================================
+
+salinity_gap_table <- salinity_spline_calendar %>%
+  dplyr::select(
+    Farm,
+    date,
+    temperature_daily_mean,
+    conductivity_daily_mean,
+    salinity_daily_mean
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(
+      temperature_daily_mean,
+      conductivity_daily_mean,
+      salinity_daily_mean
+    ),
+    names_to = "environmental_variable",
+    values_to = "value"
+  ) %>%
+  dplyr::arrange(
+    Farm,
+    environmental_variable,
+    date
+  ) %>%
+  dplyr::group_by(
+    Farm,
+    environmental_variable
+  ) %>%
+  dplyr::mutate(
+    is_missing = is.na(value),
+
+    missing_run_id = cumsum(
+      is_missing !=
+        dplyr::lag(
+          is_missing,
+          default = FALSE
+        )
+    )
+  ) %>%
+  dplyr::filter(is_missing) %>%
+  dplyr::group_by(
+    Farm,
+    environmental_variable,
+    missing_run_id
+  ) %>%
+  dplyr::summarise(
+    gap_start = min(date),
+    gap_end = max(date),
+    gap_days = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(gap_days),
+    Farm,
+    environmental_variable,
+    gap_start
+  )
+
+salinity_gap_table
+```
+
+```{r}
+gap_length_summary <- salinity_gap_table %>%
+  dplyr::group_by(
+    Farm,
+    environmental_variable
+  ) %>%
+  dplyr::summarise(
+    number_of_gaps = dplyr::n(),
+    shortest_gap = min(gap_days),
+    median_gap = median(gap_days),
+    longest_gap = max(gap_days),
+    total_missing_days = sum(gap_days),
+    .groups = "drop"
+  )
+
+gap_length_summary
+```
+
+```{r}
+# ============================================================
+# Step 4A. Natural cubic spline for internal gaps only
+# ============================================================
+
+fill_natural_spline <- function(
+    date,
+    values,
+    max_gap = 10
+) {
+
+  date_numeric <- as.numeric(date)
+
+  observed <- !is.na(values) &
+    !is.na(date_numeric)
+
+  filled_values <- values
+
+  # Cannot construct a spline with fewer than two observations
+  if (
+    sum(observed) < 2 ||
+    !any(is.na(values))
+  ) {
+    return(filled_values)
+  }
+
+  spline_model <- stats::splinefun(
+    x = date_numeric[observed],
+    y = values[observed],
+    method = "natural"
+  )
+
+  # Identify consecutive missing runs
+  missing_runs <- rle(is.na(values))
+
+  run_ends <- cumsum(
+    missing_runs$lengths
+  )
+
+  run_starts <- run_ends -
+    missing_runs$lengths + 1
+
+  missing_run_numbers <- which(
+    missing_runs$values
+  )
+
+  first_observed_position <- min(
+    which(observed)
+  )
+
+  last_observed_position <- max(
+    which(observed)
+  )
+
+  for (run_number in missing_run_numbers) {
+
+    missing_positions <-
+      run_starts[run_number]:
+      run_ends[run_number]
+
+    gap_length <- length(
+      missing_positions
+    )
+
+    internal_gap <-
+      min(missing_positions) >
+        first_observed_position &&
+      max(missing_positions) <
+        last_observed_position
+
+    # Fill only internal gaps no longer than max_gap
+    if (
+      internal_gap &&
+      gap_length <= max_gap
+    ) {
+      filled_values[missing_positions] <-
+        spline_model(
+          date_numeric[missing_positions]
+        )
+    }
+  }
+
+  filled_values
+}
+```
+
+```{r}
+# ============================================================
+# Step 4B. Apply candidate spline by station
+# ============================================================
+
+salinity_spline_candidate <-
+  salinity_spline_calendar %>%
+  dplyr::group_by(Farm) %>%
+  dplyr::arrange(
+    date,
+    .by_group = TRUE
+  ) %>%
+  dplyr::mutate(
+
+    salinity_spline = fill_natural_spline(
+      date = date,
+      values = salinity_daily_mean,
+      max_gap = 10
+    ),
+
+    conductivity_spline = fill_natural_spline(
+      date = date,
+      values = conductivity_daily_mean,
+      max_gap = 10
+    ),
+
+    salinity_spline_imputed =
+      is.na(salinity_daily_mean) &
+      !is.na(salinity_spline),
+
+    conductivity_spline_imputed =
+      is.na(conductivity_daily_mean) &
+      !is.na(conductivity_spline)
+
+  ) %>%
+  dplyr::ungroup()
+```
+
+```{r}
+spline_fill_summary <-
+  salinity_spline_candidate %>%
+  dplyr::group_by(Farm) %>%
+  dplyr::summarise(
+
+    salinity_values_filled =
+      sum(salinity_spline_imputed),
+
+    salinity_values_still_missing =
+      sum(is.na(salinity_spline)),
+
+    conductivity_values_filled =
+      sum(conductivity_spline_imputed),
+
+    conductivity_values_still_missing =
+      sum(is.na(conductivity_spline)),
+
+    .groups = "drop"
+  )
+
+spline_fill_summary
+```
+
+```{r}
+spline_imputed_values <-
+  salinity_spline_candidate %>%
+  dplyr::filter(
+    salinity_spline_imputed |
+    conductivity_spline_imputed
+  ) %>%
+  dplyr::select(
+    Farm,
+    date,
+    salinity_daily_mean,
+    salinity_spline,
+    salinity_spline_imputed,
+    conductivity_daily_mean,
+    conductivity_spline,
+    conductivity_spline_imputed
+  )
+
+spline_imputed_values
+```
+
+```{r}
+# ============================================================
+# Step 5A. Check interpolated values against observed ranges
+# ============================================================
+
+spline_range_check <-
+  salinity_spline_candidate %>%
+  dplyr::group_by(Farm) %>%
+  dplyr::summarise(
+
+    observed_salinity_min =
+      min(salinity_daily_mean, na.rm = TRUE),
+
+    observed_salinity_max =
+      max(salinity_daily_mean, na.rm = TRUE),
+
+    interpolated_salinity_min =
+      min(
+        salinity_spline[salinity_spline_imputed],
+        na.rm = TRUE
+      ),
+
+    interpolated_salinity_max =
+      max(
+        salinity_spline[salinity_spline_imputed],
+        na.rm = TRUE
+      ),
+
+    observed_conductivity_min =
+      min(conductivity_daily_mean, na.rm = TRUE),
+
+    observed_conductivity_max =
+      max(conductivity_daily_mean, na.rm = TRUE),
+
+    interpolated_conductivity_min =
+      min(
+        conductivity_spline[
+          conductivity_spline_imputed
+        ],
+        na.rm = TRUE
+      ),
+
+    interpolated_conductivity_max =
+      max(
+        conductivity_spline[
+          conductivity_spline_imputed
+        ],
+        na.rm = TRUE
+      ),
+
+    .groups = "drop"
+  )
+
+spline_range_check
+```
+
+```{r}
+spline_overshoot_check <-
+  salinity_spline_candidate %>%
+  dplyr::group_by(Farm) %>%
+  dplyr::mutate(
+
+    observed_salinity_min =
+      min(salinity_daily_mean, na.rm = TRUE),
+
+    observed_salinity_max =
+      max(salinity_daily_mean, na.rm = TRUE),
+
+    observed_conductivity_min =
+      min(conductivity_daily_mean, na.rm = TRUE),
+
+    observed_conductivity_max =
+      max(conductivity_daily_mean, na.rm = TRUE),
+
+    salinity_outside_observed_range =
+      salinity_spline_imputed &
+      (
+        salinity_spline < observed_salinity_min |
+        salinity_spline > observed_salinity_max
+      ),
+
+    conductivity_outside_observed_range =
+      conductivity_spline_imputed &
+      (
+        conductivity_spline <
+          observed_conductivity_min |
+        conductivity_spline >
+          observed_conductivity_max
+      )
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(
+    salinity_outside_observed_range |
+    conductivity_outside_observed_range
+  ) %>%
+  dplyr::select(
+    Farm,
+    date,
+    salinity_spline,
+    salinity_outside_observed_range,
+    conductivity_spline,
+    conductivity_outside_observed_range
+  )
+
+spline_overshoot_check
+```
+
+```{r}
+# ============================================================
+# Step 5B. Visual inspection of spline-filled time series
+# ============================================================
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+spline_plot_data <- salinity_spline_candidate %>%
+  dplyr::select(
+    Farm,
+    date,
+    salinity_daily_mean,
+    salinity_spline,
+    salinity_spline_imputed,
+    conductivity_daily_mean,
+    conductivity_spline,
+    conductivity_spline_imputed
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(
+      salinity_daily_mean,
+      salinity_spline,
+      conductivity_daily_mean,
+      conductivity_spline
+    ),
+    names_to = "measurement",
+    values_to = "value"
+  ) %>%
+  dplyr::mutate(
+    environmental_variable = dplyr::case_when(
+      grepl("salinity", measurement) ~ "Salinity",
+      grepl("conductivity", measurement) ~ "Conductivity"
+    ),
+
+    series = dplyr::case_when(
+      grepl("daily_mean", measurement) ~ "Observed daily mean",
+      grepl("spline", measurement) ~ "Observed + spline-filled"
+    )
+  )
+```
+
+```{r}
+spline_full_plot <- ggplot(
+  spline_plot_data,
+  aes(
+    x = date,
+    y = value,
+    linetype = series
+  )
+) +
+  geom_line(
+    na.rm = TRUE
+  ) +
+  facet_grid(
+    environmental_variable ~ Farm,
+    scales = "free_y"
+  ) +
+  labs(
+    title = "Observed and spline-filled environmental time series",
+    subtitle = "Natural cubic spline interpolation within each farm",
+    x = "Date",
+    y = "Environmental value",
+    linetype = "Series"
+  ) +
+  theme_minimal()
+
+spline_full_plot
+```
+
+```{r}
+spline_imputed_points <- salinity_spline_candidate %>%
+  dplyr::select(
+    Farm,
+    date,
+    salinity_spline,
+    salinity_spline_imputed,
+    conductivity_spline,
+    conductivity_spline_imputed
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(
+      salinity_spline,
+      conductivity_spline
+    ),
+    names_to = "measurement",
+    values_to = "value"
+  ) %>%
+  dplyr::mutate(
+    environmental_variable = dplyr::case_when(
+      measurement == "salinity_spline" ~ "Salinity",
+      measurement == "conductivity_spline" ~ "Conductivity"
+    ),
+
+    imputed = dplyr::case_when(
+      measurement == "salinity_spline" ~
+        salinity_spline_imputed,
+
+      measurement == "conductivity_spline" ~
+        conductivity_spline_imputed
+    )
+  ) %>%
+  dplyr::filter(imputed)
+```
+
+```{r}
+spline_full_plot_with_points <- ggplot(
+  salinity_spline_candidate,
+  aes(x = date)
+) +
+  geom_line(
+    aes(y = salinity_spline),
+    na.rm = TRUE
+  ) +
+  geom_point(
+    data = spline_imputed_points %>%
+      dplyr::filter(
+        environmental_variable == "Salinity"
+      ),
+    aes(
+      x = date,
+      y = value
+    ),
+    size = 2
+  ) +
+  facet_wrap(
+    ~ Farm,
+    scales = "free_y",
+    ncol = 1
+  ) +
+  labs(
+    title = "Salinity spline interpolation",
+    subtitle = "Points indicate dates filled using the natural cubic spline",
+    x = "Date",
+    y = "Daily salinity"
+  ) +
+  theme_minimal()
+
+spline_full_plot_with_points
+```
+
+```{r}
+# ============================================================
+# Step 6A. Identify observed blocks for spline validation
+# ============================================================
+
+library(dplyr)
+library(purrr)
+library(tibble)
+
+validation_gap_lengths <- c(3, 5, 6, 10)
+
+find_candidate_blocks <- function(
+    farm_data,
+    gap_length
+) {
+
+  farm_data <- farm_data %>%
+    dplyr::arrange(date)
+
+  number_of_rows <- nrow(farm_data)
+
+  # Need at least one observed day before and after the block
+  if (number_of_rows < gap_length + 2) {
+    return(tibble::tibble())
+  }
+
+  possible_starts <- seq.int(
+    from = 2,
+    to = number_of_rows - gap_length
+  )
+
+  purrr::map_dfr(
+    possible_starts,
+    function(start_position) {
+
+      end_position <-
+        start_position + gap_length - 1
+
+      hidden_positions <-
+        start_position:end_position
+
+      before_position <-
+        start_position - 1
+
+      after_position <-
+        end_position + 1
+
+      hidden_values <-
+        farm_data$salinity_daily_mean[
+          hidden_positions
+        ]
+
+      valid_block <-
+        all(!is.na(hidden_values)) &&
+        !is.na(
+          farm_data$salinity_daily_mean[
+            before_position
+          ]
+        ) &&
+        !is.na(
+          farm_data$salinity_daily_mean[
+            after_position
+          ]
+        )
+
+      if (!valid_block) {
+        return(tibble::tibble())
+      }
+
+      tibble::tibble(
+        Farm = farm_data$Farm[1],
+        gap_length = gap_length,
+        block_start =
+          farm_data$date[start_position],
+        block_end =
+          farm_data$date[end_position],
+        value_before =
+          farm_data$salinity_daily_mean[
+            before_position
+          ],
+        value_after =
+          farm_data$salinity_daily_mean[
+            after_position
+          ]
+      )
+    }
+  )
+}
+```
+
+```{r}
+candidate_spline_blocks <-
+  salinity_spline_calendar %>%
+  dplyr::group_split(Farm) %>%
+  purrr::map_dfr(
+    function(farm_data) {
+
+      purrr::map_dfr(
+        validation_gap_lengths,
+        function(current_gap_length) {
+
+          find_candidate_blocks(
+            farm_data = farm_data,
+            gap_length = current_gap_length
+          )
+        }
+      )
+    }
+  )
+```
+
+```{r}
+candidate_block_summary <-
+  candidate_spline_blocks %>%
+  dplyr::count(
+    Farm,
+    gap_length,
+    name = "candidate_windows"
+  )
+
+candidate_block_summary
+```
+
+```{r}
+dim(candidate_spline_blocks)
+
+head(
+  candidate_spline_blocks,
+  10
+)
+```
+
+```{r}
+# ============================================================
+# Step 6B. Hidden-block validation for salinity spline
+# ============================================================
+
+validate_salinity_block <- function(
+    Farm,
+    gap_length,
+    block_start,
+    block_end,
+    value_before,
+    value_after
+) {
+
+  farm_data <- salinity_spline_calendar %>%
+    dplyr::filter(Farm == .env$Farm) %>%
+    dplyr::arrange(date)
+
+  # Save the actual observed values before hiding them
+  actual_block <- farm_data %>%
+    dplyr::filter(
+      date >= block_start,
+      date <= block_end
+    ) %>%
+    dplyr::select(
+      date,
+      actual_salinity = salinity_daily_mean
+    )
+
+  # Temporarily hide the known salinity observations
+  hidden_values <- farm_data$salinity_daily_mean
+
+  hidden_positions <- which(
+    farm_data$date >= block_start &
+    farm_data$date <= block_end
+  )
+
+  hidden_values[hidden_positions] <- NA_real_
+
+  # Reconstruct the deliberately hidden block
+  predicted_values <- fill_natural_spline(
+    date = farm_data$date,
+    values = hidden_values,
+    max_gap = 10
+  )
+
+  prediction_block <- tibble::tibble(
+    date = farm_data$date,
+    predicted_salinity = predicted_values
+  ) %>%
+    dplyr::filter(
+      date >= block_start,
+      date <= block_end
+    )
+
+  actual_block %>%
+    dplyr::left_join(
+      prediction_block,
+      by = "date"
+    ) %>%
+    dplyr::mutate(
+      Farm = .env$Farm,
+      gap_length = .env$gap_length,
+      block_start = .env$block_start,
+      block_end = .env$block_end,
+
+      error =
+        predicted_salinity - actual_salinity,
+
+      absolute_error =
+        abs(error),
+
+      squared_error =
+        error^2
+    ) %>%
+    dplyr::select(
+      Farm,
+      gap_length,
+      block_start,
+      block_end,
+      date,
+      actual_salinity,
+      predicted_salinity,
+      error,
+      absolute_error,
+      squared_error
+    )
+}
+```
+
+```{r}
+salinity_validation_predictions <-
+  purrr::pmap_dfr(
+    candidate_spline_blocks,
+    validate_salinity_block
+  )
+
+dim(salinity_validation_predictions)
+
+head(
+  salinity_validation_predictions,
+  10
+)
+```
+
+```{r}
+salinity_validation_by_window <-
+  salinity_validation_predictions %>%
+  dplyr::group_by(
+    Farm,
+    gap_length,
+    block_start,
+    block_end
+  ) %>%
+  dplyr::summarise(
+    days_predicted = dplyr::n(),
+
+    MAE =
+      mean(absolute_error),
+
+    RMSE =
+      sqrt(mean(squared_error)),
+
+    bias =
+      mean(error),
+
+    maximum_absolute_error =
+      max(absolute_error),
+
+    .groups = "drop"
+  )
+
+head(
+  salinity_validation_by_window,
+  10
+)
+```
+
+```{r}
+# ============================================================
+# Step 6D. Summarize validation accuracy by farm and gap length
+# ============================================================
+
+salinity_validation_summary <-
+  salinity_validation_by_window %>%
+  dplyr::group_by(
+    Farm,
+    gap_length
+  ) %>%
+  dplyr::summarise(
+    validation_windows = dplyr::n(),
+
+    mean_MAE = mean(
+      MAE,
+      na.rm = TRUE
+    ),
+
+    median_MAE = median(
+      MAE,
+      na.rm = TRUE
+    ),
+
+    mean_RMSE = mean(
+      RMSE,
+      na.rm = TRUE
+    ),
+
+    mean_bias = mean(
+      bias,
+      na.rm = TRUE
+    ),
+
+    median_maximum_error = median(
+      maximum_absolute_error,
+      na.rm = TRUE
+    ),
+
+    MAE_95_percentile = as.numeric(
+      stats::quantile(
+        MAE,
+        probs = 0.95,
+        na.rm = TRUE
+      )
+    ),
+
+    .groups = "drop"
+  )
+
+salinity_validation_summary
+```
+
+```{r}
+salinity_validation_overall <-
+  salinity_validation_by_window %>%
+  dplyr::summarise(
+    validation_windows = dplyr::n(),
+
+    mean_MAE = mean(
+      MAE,
+      na.rm = TRUE
+    ),
+
+    median_MAE = median(
+      MAE,
+      na.rm = TRUE
+    ),
+
+    mean_RMSE = mean(
+      RMSE,
+      na.rm = TRUE
+    ),
+
+    mean_bias = mean(
+      bias,
+      na.rm = TRUE
+    ),
+
+    MAE_95_percentile = as.numeric(
+      stats::quantile(
+        MAE,
+        probs = 0.95,
+        na.rm = TRUE
+      )
+    )
+  )
+
+salinity_validation_overall
+```
+
+Missing daily salinity values were interpolated separately by farm using natural cubic splines. Hidden-block validation showed low overall bias, although prediction error increased for longer gaps and was greater at DUML. Event-level analyses retained indicators describing the number and proportion of spline-filled days.
+
+```{r}
+# ============================================================
+# Step 7A. Hidden-block validation for conductivity
+# ============================================================
+
+validate_conductivity_block <- function(
+    Farm,
+    gap_length,
+    block_start,
+    block_end,
+    value_before,
+    value_after
+) {
+
+  farm_data <- salinity_spline_calendar %>%
+    dplyr::filter(Farm == .env$Farm) %>%
+    dplyr::arrange(date)
+
+  # Save the real values before hiding them
+  actual_block <- farm_data %>%
+    dplyr::filter(
+      date >= block_start,
+      date <= block_end
+    ) %>%
+    dplyr::select(
+      date,
+      actual_conductivity = conductivity_daily_mean
+    )
+
+  # Temporarily hide the known conductivity values
+  hidden_values <- farm_data$conductivity_daily_mean
+
+  hidden_positions <- which(
+    farm_data$date >= block_start &
+      farm_data$date <= block_end
+  )
+
+  hidden_values[hidden_positions] <- NA_real_
+
+  # Reconstruct the deliberately hidden block
+  predicted_values <- fill_natural_spline(
+    date = farm_data$date,
+    values = hidden_values,
+    max_gap = 10
+  )
+
+  prediction_block <- tibble::tibble(
+    date = farm_data$date,
+    predicted_conductivity = predicted_values
+  ) %>%
+    dplyr::filter(
+      date >= block_start,
+      date <= block_end
+    )
+
+  actual_block %>%
+    dplyr::left_join(
+      prediction_block,
+      by = "date"
+    ) %>%
+    dplyr::mutate(
+      Farm = .env$Farm,
+      gap_length = .env$gap_length,
+      block_start = .env$block_start,
+      block_end = .env$block_end,
+
+      error =
+        predicted_conductivity -
+        actual_conductivity,
+
+      absolute_error =
+        abs(error),
+
+      squared_error =
+        error^2
+    ) %>%
+    dplyr::select(
+      Farm,
+      gap_length,
+      block_start,
+      block_end,
+      date,
+      actual_conductivity,
+      predicted_conductivity,
+      error,
+      absolute_error,
+      squared_error
+    )
+}
+```
+
+```{r}
+conductivity_validation_predictions <-
+  purrr::pmap_dfr(
+    candidate_spline_blocks,
+    validate_conductivity_block
+  )
+
+dim(conductivity_validation_predictions)
+
+head(
+  conductivity_validation_predictions,
+  10
+)
+```
+
+```{r}
+conductivity_validation_by_window <-
+  conductivity_validation_predictions %>%
+  dplyr::group_by(
+    Farm,
+    gap_length,
+    block_start,
+    block_end
+  ) %>%
+  dplyr::summarise(
+    days_predicted = dplyr::n(),
+
+    MAE =
+      mean(absolute_error, na.rm = TRUE),
+
+    RMSE =
+      sqrt(
+        mean(squared_error, na.rm = TRUE)
+      ),
+
+    bias =
+      mean(error, na.rm = TRUE),
+
+    maximum_absolute_error =
+      max(absolute_error, na.rm = TRUE),
+
+    .groups = "drop"
+  )
+```
+
+```{r}
+conductivity_validation_summary <-
+  conductivity_validation_by_window %>%
+  dplyr::group_by(
+    Farm,
+    gap_length
+  ) %>%
+  dplyr::summarise(
+    validation_windows = dplyr::n(),
+
+    mean_MAE =
+      mean(MAE, na.rm = TRUE),
+
+    median_MAE =
+      median(MAE, na.rm = TRUE),
+
+    mean_RMSE =
+      mean(RMSE, na.rm = TRUE),
+
+    mean_bias =
+      mean(bias, na.rm = TRUE),
+
+    median_maximum_error =
+      median(
+        maximum_absolute_error,
+        na.rm = TRUE
+      ),
+
+    MAE_95_percentile = as.numeric(
+      stats::quantile(
+        MAE,
+        probs = 0.95,
+        na.rm = TRUE
+      )
+    ),
+
+    .groups = "drop"
+  )
+
+conductivity_validation_summary
+```
+
+```{r}
+conductivity_validation_overall <-
+  conductivity_validation_by_window %>%
+  dplyr::summarise(
+    validation_windows = dplyr::n(),
+
+    mean_MAE =
+      mean(MAE, na.rm = TRUE),
+
+    median_MAE =
+      median(MAE, na.rm = TRUE),
+
+    mean_RMSE =
+      mean(RMSE, na.rm = TRUE),
+
+    mean_bias =
+      mean(bias, na.rm = TRUE),
+
+    MAE_95_percentile = as.numeric(
+      stats::quantile(
+        MAE,
+        probs = 0.95,
+        na.rm = TRUE
+      )
+    )
+  )
+
+conductivity_validation_overall
+```
+
+```{r}
+# ============================================================
+# Step 8. Finalize daily salinity and conductivity series
+# ============================================================
+
+environment_daily_spline_final <-
+  salinity_spline_candidate %>%
+  dplyr::mutate(
+
+    salinity_daily_final =
+      dplyr::coalesce(
+        salinity_daily_mean,
+        salinity_spline
+      ),
+
+    conductivity_daily_final =
+      dplyr::coalesce(
+        conductivity_daily_mean,
+        conductivity_spline
+      ),
+
+    salinity_value_source =
+      dplyr::if_else(
+        salinity_spline_imputed,
+        "spline",
+        "observed"
+      ),
+
+    conductivity_value_source =
+      dplyr::if_else(
+        conductivity_spline_imputed,
+        "spline",
+        "observed"
+      )
+  ) %>%
+  dplyr::select(
+    Farm,
+    date,
+
+    temperature_daily_mean,
+
+    salinity_daily_mean,
+    salinity_daily_final,
+    salinity_spline_imputed,
+    salinity_value_source,
+
+    conductivity_daily_mean,
+    conductivity_daily_final,
+    conductivity_spline_imputed,
+    conductivity_value_source
+  )
+```
+
+```{r}
+final_spline_checks <- environment_daily_spline_final %>%
+  dplyr::summarise(
+
+    salinity_observed_values_changed = sum(
+      !is.na(salinity_daily_mean) &
+      abs(
+        salinity_daily_final -
+          salinity_daily_mean
+      ) > 1e-10
+    ),
+
+    conductivity_observed_values_changed = sum(
+      !is.na(conductivity_daily_mean) &
+      abs(
+        conductivity_daily_final -
+          conductivity_daily_mean
+      ) > 1e-10
+    ),
+
+    salinity_values_still_missing =
+      sum(is.na(salinity_daily_final)),
+
+    conductivity_values_still_missing =
+      sum(is.na(conductivity_daily_final)),
+
+    salinity_values_imputed =
+      sum(salinity_spline_imputed),
+
+    conductivity_values_imputed =
+      sum(conductivity_spline_imputed)
+  )
+
+final_spline_checks
+```
+
+```{r}
+# ============================================================
+# Step 9A. Confirm the six collection-event windows
+# ============================================================
+
+dim(event_windows)
+names(event_windows)
+
+head(
+  event_windows,
+  10
+)
+```
+
+```{r}
+event_day_grid <- event_windows %>%
+  dplyr::mutate(
+    date_collected = as.Date(date_collected),
+
+    event_id = paste0(
+      location,
+      "_",
+      format(date_collected, "%Y%m%d")
+    )
+  ) %>%
+  dplyr::select(
+    event_id,
+    location,
+    station,
+    month,
+    date_collected,
+    window_start,
+    window_end,
+    date
+  ) %>%
+  dplyr::distinct() %>%
+  dplyr::arrange(
+    event_id,
+    date
+  )
+```
+
+```{r}
+event_window_check <- event_day_grid %>%
+  dplyr::group_by(
+    event_id,
+    location,
+    station,
+    month,
+    date_collected
+  ) %>%
+  dplyr::summarise(
+    window_start = min(date),
+    window_end = max(date),
+    days_in_window = dplyr::n_distinct(date),
+    .groups = "drop"
+  )
+
+event_window_check
+```
+
+```{r}
+dim(event_day_grid)
+
+table(event_day_grid$event_id)
+```
+
+```{r}
+names(environment_daily_spline_final)
+
+names(do_temperature_daily)
+
+names(do_daily)
+
+names(ph_daily)
+
+names(precip_daily)
+```
+
+```{r}
+# ============================================================
+# Step 9C. Prepare daily environmental tables for joining
+# ============================================================
+
+spline_daily_for_join <-
+  environment_daily_spline_final %>%
+  dplyr::transmute(
+    station = Farm,
+    date,
+
+    salinity_daily_final,
+    salinity_spline_imputed,
+    salinity_value_source,
+
+    conductivity_daily_final,
+    conductivity_spline_imputed,
+    conductivity_value_source
+  )
+
+temperature_daily_for_join <-
+  do_temperature_daily %>%
+  dplyr::select(
+    station,
+    date,
+    temperature_DO_daily_mean,
+    temperature_DO_observations
+  )
+
+do_daily_for_join <-
+  do_daily %>%
+  dplyr::transmute(
+    station = Farm,
+    date,
+    DO_daily_mean,
+    DO_observations
+  )
+
+ph_daily_for_join <-
+  ph_daily %>%
+  dplyr::transmute(
+    station = Farm,
+    date,
+    pH_daily_mean,
+    pH_observations
+  )
+
+precip_daily_for_join <-
+  precip_daily %>%
+  dplyr::select(
+    date,
+    precipitation_daily_mm,
+    precipitation_observations
+  )
+```
+
+```{r}
+daily_source_duplicate_check <- tibble::tibble(
+  source = c(
+    "salinity_conductivity",
+    "temperature",
+    "DO",
+    "pH",
+    "precipitation"
+  ),
+
+  duplicated_keys = c(
+    sum(
+      duplicated(
+        spline_daily_for_join[
+          c("station", "date")
+        ]
+      )
+    ),
+
+    sum(
+      duplicated(
+        temperature_daily_for_join[
+          c("station", "date")
+        ]
+      )
+    ),
+
+    sum(
+      duplicated(
+        do_daily_for_join[
+          c("station", "date")
+        ]
+      )
+    ),
+
+    sum(
+      duplicated(
+        ph_daily_for_join[
+          c("station", "date")
+        ]
+      )
+    ),
+
+    sum(
+      duplicated(
+        precip_daily_for_join["date"]
+      )
+    )
+  )
+)
+
+daily_source_duplicate_check
+```
+
+```{r}
+event_daily_environment <-
+  event_day_grid %>%
+
+  dplyr::left_join(
+    spline_daily_for_join,
+    by = c(
+      "station",
+      "date"
+    )
+  ) %>%
+
+  dplyr::left_join(
+    temperature_daily_for_join,
+    by = c(
+      "station",
+      "date"
+    )
+  ) %>%
+
+  dplyr::left_join(
+    do_daily_for_join,
+    by = c(
+      "station",
+      "date"
+    )
+  ) %>%
+
+  dplyr::left_join(
+    ph_daily_for_join,
+    by = c(
+      "station",
+      "date"
+    )
+  ) %>%
+
+  dplyr::left_join(
+    precip_daily_for_join,
+    by = "date"
+  ) %>%
+
+  dplyr::arrange(
+    event_id,
+    date
+  )
+```
+
+```{r}
+dim(event_daily_environment)
+
+names(event_daily_environment)
+
+head(
+  event_daily_environment,
+  10
+)
+```
+
+```{r}
+event_daily_coverage_check <-
+  event_daily_environment %>%
+  dplyr::group_by(
+    event_id,
+    location,
+    station,
+    month,
+    date_collected
+  ) %>%
+  dplyr::summarise(
+    days_in_window =
+      dplyr::n_distinct(date),
+
+    temperature_days =
+      sum(
+        !is.na(temperature_DO_daily_mean)
+      ),
+
+    DO_days =
+      sum(
+        !is.na(DO_daily_mean)
+      ),
+
+    salinity_days =
+      sum(
+        !is.na(salinity_daily_final)
+      ),
+
+    salinity_spline_days =
+      sum(
+        salinity_spline_imputed,
+        na.rm = TRUE
+      ),
+
+    conductivity_days =
+      sum(
+        !is.na(conductivity_daily_final)
+      ),
+
+    conductivity_spline_days =
+      sum(
+        conductivity_spline_imputed,
+        na.rm = TRUE
+      ),
+
+    pH_days =
+      sum(
+        !is.na(pH_daily_mean)
+      ),
+
+    precipitation_days =
+      sum(
+        !is.na(precipitation_daily_mm)
+      ),
+
+    .groups = "drop"
+  )
+
+event_daily_coverage_check
+```
+
+```{r}
+unexpected_missing_event_days <-
+  event_daily_environment %>%
+  dplyr::filter(
+    is.na(temperature_DO_daily_mean) |
+    is.na(DO_daily_mean) |
+    is.na(salinity_daily_final) |
+    is.na(conductivity_daily_final) |
+    is.na(precipitation_daily_mm)
+  ) %>%
+  dplyr::select(
+    event_id,
+    location,
+    station,
+    date,
+    temperature_DO_daily_mean,
+    DO_daily_mean,
+    salinity_daily_final,
+    conductivity_daily_final,
+    precipitation_daily_mm
+  )
+
+unexpected_missing_event_days
+```
+
+```{r}
+# ============================================================
+# Step 9E. Build final six-event environmental summary
+# ============================================================
+
+environmental_events_7d_spline <-
+  event_daily_environment %>%
+  dplyr::group_by(
+    event_id,
+    location,
+    station,
+    month,
+    date_collected,
+    window_start,
+    window_end
+  ) %>%
+  dplyr::summarise(
+
+    # --------------------------------------------------------
+    # Temperature
+    # --------------------------------------------------------
+
+    temperature_7d_mean =
+      mean(
+        temperature_DO_daily_mean,
+        na.rm = TRUE
+      ),
+
+    temperature_days_used =
+      sum(
+        !is.na(temperature_DO_daily_mean)
+      ),
+
+    temperature_sensor_observations =
+      sum(
+        temperature_DO_observations,
+        na.rm = TRUE
+      ),
+
+    # --------------------------------------------------------
+    # Dissolved oxygen
+    # --------------------------------------------------------
+
+    DO_7d_mean =
+      mean(
+        DO_daily_mean,
+        na.rm = TRUE
+      ),
+
+    DO_days_used =
+      sum(
+        !is.na(DO_daily_mean)
+      ),
+
+    DO_sensor_observations =
+      sum(
+        DO_observations,
+        na.rm = TRUE
+      ),
+
+    # --------------------------------------------------------
+    # Salinity
+    # --------------------------------------------------------
+
+    salinity_7d_spline_mean =
+      mean(
+        salinity_daily_final,
+        na.rm = TRUE
+      ),
+
+    salinity_days_used =
+      sum(
+        !is.na(salinity_daily_final)
+      ),
+
+    salinity_observed_days =
+      sum(
+        !salinity_spline_imputed,
+        na.rm = TRUE
+      ),
+
+    salinity_spline_days =
+      sum(
+        salinity_spline_imputed,
+        na.rm = TRUE
+      ),
+
+    salinity_fraction_spline =
+      sum(
+        salinity_spline_imputed,
+        na.rm = TRUE
+      ) / dplyr::n(),
+
+    # --------------------------------------------------------
+    # Conductivity
+    # --------------------------------------------------------
+
+    conductivity_7d_spline_mean =
+      mean(
+        conductivity_daily_final,
+        na.rm = TRUE
+      ),
+
+    conductivity_days_used =
+      sum(
+        !is.na(conductivity_daily_final)
+      ),
+
+    conductivity_observed_days =
+      sum(
+        !conductivity_spline_imputed,
+        na.rm = TRUE
+      ),
+
+    conductivity_spline_days =
+      sum(
+        conductivity_spline_imputed,
+        na.rm = TRUE
+      ),
+
+    conductivity_fraction_spline =
+      sum(
+        conductivity_spline_imputed,
+        na.rm = TRUE
+      ) / dplyr::n(),
+
+    # --------------------------------------------------------
+    # pH: retain available-data mean without filling
+    # --------------------------------------------------------
+
+    pH_7d_available_mean =
+      if (
+        all(is.na(pH_daily_mean))
+      ) {
+        NA_real_
+      } else {
+        mean(
+          pH_daily_mean,
+          na.rm = TRUE
+        )
+      },
+
+    pH_days_used =
+      sum(
+        !is.na(pH_daily_mean)
+      ),
+
+    pH_coverage =
+      sum(
+        !is.na(pH_daily_mean)
+      ) / dplyr::n(),
+
+    pH_sensor_observations =
+      sum(
+        pH_observations,
+        na.rm = TRUE
+      ),
+
+    # --------------------------------------------------------
+    # Precipitation
+    # --------------------------------------------------------
+
+    precipitation_7d_total_mm =
+      sum(
+        precipitation_daily_mm,
+        na.rm = TRUE
+      ),
+
+    precipitation_days_used =
+      sum(
+        !is.na(precipitation_daily_mm)
+      ),
+
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+
+    salinity_quality =
+      dplyr::case_when(
+        salinity_spline_days == 0 ~
+          "complete_observed",
+
+        salinity_fraction_spline <= 0.50 ~
+          "spline_at_most_half",
+
+        TRUE ~
+          "spline_over_half"
+      ),
+
+    conductivity_quality =
+      dplyr::case_when(
+        conductivity_spline_days == 0 ~
+          "complete_observed",
+
+        conductivity_fraction_spline <= 0.50 ~
+          "spline_at_most_half",
+
+        TRUE ~
+          "spline_over_half"
+      ),
+
+    pH_quality =
+      dplyr::case_when(
+        pH_days_used == 7 ~
+          "complete_7_of_7",
+
+        pH_days_used >= 4 ~
+          "partial_at_least_half",
+
+        pH_days_used > 0 ~
+          "partial_under_half",
+
+        TRUE ~
+          "no_data"
+      )
+  ) %>%
+  dplyr::arrange(
+    factor(
+      month,
+      levels = c("Jun", "Jul", "Aug")
+    ),
+    location
+  )
+```
+
+```{r}
+dim(environmental_events_7d_spline)
+
+environmental_events_7d_spline
+```
+
+```{r}
+environmental_events_7d_spline %>%
+  dplyr::select(
+    event_id,
+    location,
+    month,
+
+    temperature_7d_mean,
+    DO_7d_mean,
+
+    salinity_7d_spline_mean,
+    salinity_spline_days,
+    salinity_fraction_spline,
+    salinity_quality,
+
+    conductivity_7d_spline_mean,
+    conductivity_spline_days,
+
+    pH_7d_available_mean,
+    pH_days_used,
+    pH_quality,
+
+    precipitation_7d_total_mm
+  )
+```
+
+```{r}
+event_summary_integrity_check <-
+  environmental_events_7d_spline %>%
+  dplyr::summarise(
+    events = dplyr::n(),
+
+    unique_events =
+      dplyr::n_distinct(event_id),
+
+    temperature_missing =
+      sum(is.na(temperature_7d_mean)),
+
+    DO_missing =
+      sum(is.na(DO_7d_mean)),
+
+    salinity_missing =
+      sum(is.na(salinity_7d_spline_mean)),
+
+    conductivity_missing =
+      sum(is.na(conductivity_7d_spline_mean)),
+
+    pH_missing =
+      sum(is.na(pH_7d_available_mean)),
+
+    precipitation_missing =
+      sum(is.na(precipitation_7d_total_mm))
+  )
+
+event_summary_integrity_check
+```
+
+```{r}
+# ============================================================
+# Step 10A. Build expanded WGCNA event-level trait table
+# ============================================================
+
+big_environment_traits <-
+  environmental_events_7d_spline %>%
+  dplyr::transmute(
+    event_id,
+    location,
+    month,
+
+    # Environmental traits
+    temperature_7d_mean,
+    DO_7d_mean,
+    salinity_7d_spline_mean,
+    conductivity_7d_spline_mean,
+    pH_7d_available_mean,
+    precipitation_7d_total_mm,
+
+    # Month indicator variables
+    month_Jun = as.integer(month == "Jun"),
+    month_Jul = as.integer(month == "Jul"),
+    month_Aug = as.integer(month == "Aug"),
+
+    # Positive correlation means higher at DAF than CMT
+    location_DAF = as.integer(location == "DAF"),
+
+    # Retain quality information for interpretation
+    salinity_fraction_spline,
+    conductivity_fraction_spline,
+    pH_coverage
+  )
+
+big_environment_traits
+```
+
+```{r}
+dim(big_environment_traits)
+
+big_trait_missing_check <-
+  big_environment_traits %>%
+  dplyr::summarise(
+    dplyr::across(
+      dplyr::everything(),
+      ~ sum(is.na(.x))
+    )
+  )
+
+big_trait_missing_check
+```
+
+```{r}
+# ============================================================
+# Step 10B. Load corrected six-event module eigengenes
+# ============================================================
+
+event_eigengene_path <-
+  "WGCNA_event_level_module_eigengenes.rds"
+
+file.exists(event_eigengene_path)
+```
+
+```{r}
+event_module_eigengenes <-
+  readRDS(event_eigengene_path)
+
+class(event_module_eigengenes)
+
+dim(event_module_eigengenes)
+
+names(event_module_eigengenes)
+
+rownames(event_module_eigengenes)
+
+head(event_module_eigengenes)
+```
+
+```{r}
+# ============================================================
+# Step 10C. Align module eigengenes and expanded traits
+# ============================================================
+
+module_columns <- grep(
+  "^ME",
+  names(event_module_eigengenes),
+  value = TRUE
+)
+
+module_columns
+```
+
+```{r}
+event_id_duplicate_check <- tibble::tibble(
+  table = c(
+    "module_eigengenes",
+    "environment_traits"
+  ),
+
+  duplicate_event_ids = c(
+    sum(
+      duplicated(
+        event_module_eigengenes$event_id
+      )
+    ),
+
+    sum(
+      duplicated(
+        big_environment_traits$event_id
+      )
+    )
+  )
+)
+
+event_id_duplicate_check
+```
+
+```{r}
+event_alignment_check <- list(
+
+  eigengenes_not_in_traits = setdiff(
+    event_module_eigengenes$event_id,
+    big_environment_traits$event_id
+  ),
+
+  traits_not_in_eigengenes = setdiff(
+    big_environment_traits$event_id,
+    event_module_eigengenes$event_id
+  )
+)
+
+event_alignment_check
+```
+
+```{r}
+big_wgcna_event_data <-
+  event_module_eigengenes %>%
+  dplyr::select(
+    event_id,
+    dplyr::all_of(module_columns)
+  ) %>%
+  dplyr::inner_join(
+    big_environment_traits,
+    by = "event_id"
+  ) %>%
+  dplyr::arrange(
+    factor(
+      month,
+      levels = c("Jun", "Jul", "Aug")
+    ),
+    location
+  )
+```
+
+```{r}
+dim(big_wgcna_event_data)
+
+big_wgcna_event_data %>%
+  dplyr::select(
+    event_id,
+    location,
+    month,
+    dplyr::all_of(module_columns),
+    temperature_7d_mean,
+    DO_7d_mean,
+    salinity_7d_spline_mean,
+    conductivity_7d_spline_mean,
+    pH_7d_available_mean,
+    precipitation_7d_total_mm
+  )
+```
+
+```{r}
+alignment_integrity_check <-
+  big_wgcna_event_data %>%
+  dplyr::summarise(
+    rows = dplyr::n(),
+    unique_events =
+      dplyr::n_distinct(event_id),
+
+    missing_module_values =
+      sum(
+        is.na(
+          dplyr::across(
+            dplyr::all_of(module_columns)
+          )
+        )
+      )
+  )
+
+alignment_integrity_check
+```
+
+```{r}
+# ============================================================
+# Step 10D. Create aligned module and trait matrices
+# ============================================================
+
+trait_columns <- c(
+  "temperature_7d_mean",
+  "DO_7d_mean",
+  "salinity_7d_spline_mean",
+  "conductivity_7d_spline_mean",
+  "pH_7d_available_mean",
+  "precipitation_7d_total_mm",
+  "month_Jun",
+  "month_Jul",
+  "month_Aug",
+  "location_DAF"
+)
+
+module_matrix_big <- big_wgcna_event_data %>%
+  dplyr::select(
+    dplyr::all_of(module_columns)
+  ) %>%
+  as.matrix()
+
+trait_matrix_big <- big_wgcna_event_data %>%
+  dplyr::select(
+    dplyr::all_of(trait_columns)
+  ) %>%
+  as.matrix()
+
+rownames(module_matrix_big) <-
+  big_wgcna_event_data$event_id
+
+rownames(trait_matrix_big) <-
+  big_wgcna_event_data$event_id
+
+storage.mode(module_matrix_big) <- "numeric"
+storage.mode(trait_matrix_big) <- "numeric"
+```
+
+```{r}
+dim(module_matrix_big)
+dim(trait_matrix_big)
+
+identical(
+  rownames(module_matrix_big),
+  rownames(trait_matrix_big)
+)
+
+colnames(module_matrix_big)
+colnames(trait_matrix_big)
+```
+
+```{r}
+# ============================================================
+# Step 10E. Calculate module–trait correlations
+# ============================================================
+
+calculate_module_trait_result <- function(
+    module_name,
+    trait_name
+) {
+
+  module_values <-
+    module_matrix_big[, module_name]
+
+  trait_values <-
+    trait_matrix_big[, trait_name]
+
+  complete_rows <- complete.cases(
+    module_values,
+    trait_values
+  )
+
+  n_complete <- sum(complete_rows)
+
+  module_complete <-
+    module_values[complete_rows]
+
+  trait_complete <-
+    trait_values[complete_rows]
+
+  # Correlation cannot be calculated with fewer than 3 values
+  # or when either variable has no variation
+  if (
+    n_complete < 3 ||
+    stats::sd(module_complete) == 0 ||
+    stats::sd(trait_complete) == 0
+  ) {
+    return(
+      tibble::tibble(
+        module = module_name,
+        trait = trait_name,
+        correlation = NA_real_,
+        n_events = n_complete,
+        p_value = NA_real_
+      )
+    )
+  }
+
+  correlation_value <- stats::cor(
+    module_complete,
+    trait_complete,
+    method = "pearson"
+  )
+
+  # Convert correlation to a t statistic
+  t_statistic <- correlation_value *
+    sqrt(
+      (n_complete - 2) /
+        (1 - correlation_value^2)
+    )
+
+  p_value <- 2 * stats::pt(
+    -abs(t_statistic),
+    df = n_complete - 2
+  )
+
+  tibble::tibble(
+    module = module_name,
+    trait = trait_name,
+    correlation = correlation_value,
+    n_events = n_complete,
+    p_value = p_value
+  )
+}
+```
+
+```{r}
+big_module_trait_results <- tidyr::expand_grid(
+  module = module_columns,
+  trait = trait_columns
+) %>%
+  purrr::pmap_dfr(
+    calculate_module_trait_result
+  ) %>%
+  dplyr::mutate(
+    FDR = stats::p.adjust(
+      p_value,
+      method = "BH"
+    ),
+
+    absolute_correlation =
+      abs(correlation)
+  ) %>%
+  dplyr::arrange(
+    p_value
+  )
+
+dim(big_module_trait_results)
+
+big_module_trait_results
+```
+
+```{r}
+strongest_big_module_trait_results <-
+  big_module_trait_results %>%
+  dplyr::filter(
+    !is.na(correlation)
+  ) %>%
+  dplyr::arrange(
+    p_value
+  ) %>%
+  dplyr::slice_head(
+    n = 20
+  )
+
+strongest_big_module_trait_results
+```
+
+```{r}
+big_module_trait_results %>%
+  dplyr::count(
+    trait,
+    n_events
+  )
+```
+
+```{r}
+# ============================================================
+# Step 10G. Expanded module-trait correlation heatmap
+# ============================================================
+
+library(dplyr)
+library(pheatmap)
+
+module_order <- c(
+  "MEbrown",
+  "MEturquoise",
+  "MEgreen",
+  "MEblack",
+  "MEred",
+  "MEblue",
+  "MEyellow"
+)
+
+trait_order <- c(
+  "temperature_7d_mean",
+  "DO_7d_mean",
+  "salinity_7d_spline_mean",
+  "conductivity_7d_spline_mean",
+  "pH_7d_available_mean",
+  "precipitation_7d_total_mm",
+  "month_Jun",
+  "month_Jul",
+  "month_Aug",
+  "location_DAF"
+)
+
+heatmap_results <- big_module_trait_results %>%
+  dplyr::mutate(
+    module = factor(
+      module,
+      levels = module_order
+    ),
+    trait = factor(
+      trait,
+      levels = trait_order
+    )
+  ) %>%
+  dplyr::arrange(
+    module,
+    trait
+  )
+```
+
+```{r}
+
+
+# ============================================================
+# Build a matrix from one results column
+# ============================================================
+
+make_result_matrix <- function(value_column) {
+
+  result_matrix <- matrix(
+    NA_real_,
+    nrow = length(module_order),
+    ncol = length(trait_order),
+    dimnames = list(
+      module_order,
+      trait_order
+    )
+  )
+
+  for (row_number in seq_len(nrow(heatmap_results))) {
+
+    current_module <- as.character(
+      heatmap_results$module[row_number]
+    )
+
+    current_trait <- as.character(
+      heatmap_results$trait[row_number]
+    )
+
+    result_matrix[
+      current_module,
+      current_trait
+    ] <- heatmap_results[[value_column]][row_number]
+  }
+
+  return(result_matrix)
+}
+```
+
+```{r}
+big_correlation_matrix <-
+  make_result_matrix("correlation")
+
+big_pvalue_matrix <-
+  make_result_matrix("p_value")
+
+big_FDR_matrix <-
+  make_result_matrix("FDR")
+
+big_n_matrix <-
+  make_result_matrix("n_events")
+```
+
+```{r}
+big_heatmap_text <- matrix(
+  "",
+  nrow = nrow(big_correlation_matrix),
+  ncol = ncol(big_correlation_matrix),
+  dimnames = dimnames(big_correlation_matrix)
+)
+
+for (row_number in seq_len(
+  nrow(big_correlation_matrix)
+)) {
+
+  for (column_number in seq_len(
+    ncol(big_correlation_matrix)
+  )) {
+
+    correlation_value <-
+      big_correlation_matrix[
+        row_number,
+        column_number
+      ]
+
+    p_value <-
+      big_pvalue_matrix[
+        row_number,
+        column_number
+      ]
+
+    FDR_value <-
+      big_FDR_matrix[
+        row_number,
+        column_number
+      ]
+
+    n_value <-
+      big_n_matrix[
+        row_number,
+        column_number
+      ]
+
+    significance_symbol <- dplyr::case_when(
+      !is.na(FDR_value) &&
+        FDR_value < 0.05 ~ "**",
+
+      !is.na(p_value) &&
+        p_value < 0.05 ~ "*",
+
+      TRUE ~ ""
+    )
+
+    p_text <- if (
+      is.na(p_value)
+    ) {
+      "NA"
+    } else {
+      format.pval(
+        p_value,
+        digits = 2,
+        eps = 0.001
+      )
+    }
+
+    big_heatmap_text[
+      row_number,
+      column_number
+    ] <- paste0(
+      sprintf(
+        "%.2f",
+        correlation_value
+      ),
+      significance_symbol,
+      "\np=",
+      p_text,
+      "\nn=",
+      n_value
+    )
+  }
+}
+```
+
+```{r}
+trait_display_labels <- c(
+  temperature_7d_mean =
+    "Temperature",
+
+  DO_7d_mean =
+    "Dissolved oxygen",
+
+  salinity_7d_spline_mean =
+    "Salinity\n(spline)",
+
+  conductivity_7d_spline_mean =
+    "Conductivity\n(spline)",
+
+  pH_7d_available_mean =
+    "pH\n(available)",
+
+  precipitation_7d_total_mm =
+    "Precipitation",
+
+  month_Jun =
+    "June",
+
+  month_Jul =
+    "July",
+
+  month_Aug =
+    "August",
+
+  location_DAF =
+    "Location\nDAF vs CMT"
+)
+
+display_column_names <-
+  unname(
+    trait_display_labels[
+      colnames(big_correlation_matrix)
+    ]
+  )
+
+colnames(big_correlation_matrix) <-
+  display_column_names
+
+colnames(big_heatmap_text) <-
+  display_column_names
+```
+
+```{r}
+expanded_wgcna_heatmap <-
+  pheatmap::pheatmap(
+    big_correlation_matrix,
+
+    cluster_rows = FALSE,
+    cluster_cols = FALSE,
+
+    breaks = seq(
+      -1,
+      1,
+      length.out = 102
+    ),
+
+    color = colorRampPalette(
+      c(
+        "blue",
+        "white",
+        "red"
+      )
+    )(101),
+
+    display_numbers =
+      big_heatmap_text,
+
+    number_color = "black",
+    fontsize_number = 6.5,
+    fontsize_row = 10,
+    fontsize_col = 9,
+
+    angle_col = 45,
+
+    border_color = "grey80",
+
+    main = paste0(
+      "Expanded module-trait correlations\n",
+      "* nominal p < 0.05; ",
+      "** BH-FDR < 0.05"
+    ),
+
+    filename =
+      "WGCNA_big_corrected_module_trait_heatmap_spline.pdf",
+
+    width = 15,
+    height = 9
+  )
+```
+
+```{r}
+write.csv(
+  big_module_trait_results,
+  "WGCNA_big_corrected_module_trait_results_spline.csv",
+  row.names = FALSE
+)
+```
+
+```{r}
+pheatmap::pheatmap(
+  big_correlation_matrix,
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  breaks = seq(-1, 1, length.out = 102),
+  color = colorRampPalette(
+    c("blue", "white", "red")
+  )(101),
+  display_numbers = big_heatmap_text,
+  number_color = "black",
+  fontsize_number = 6.5,
+  fontsize_row = 10,
+  fontsize_col = 9,
+  angle_col = 45,
+  border_color = "grey80",
+  main = paste0(
+    "Expanded module-trait correlations\n",
+    "* nominal p < 0.05; ",
+    "** BH-FDR < 0.05"
+  )
+)
+```
+
+```{r}
+required_environment_columns <- c(
+  "event_id",
+  "location",
+  "month",
+  "temperature_7d_mean",
+  "DO_7d_mean",
+  "salinity_7d_spline_mean",
+  "conductivity_7d_spline_mean",
+  "pH_7d_available_mean",
+  "precipitation_7d_total_mm"
+)
+
+setdiff(
+  required_environment_columns,
+  names(environmental_events_7d)
+)
+
+dim(environmental_events_7d)
 ```
