@@ -57,6 +57,7 @@ load_do <- function(file, farm){
            Temp_C = as.numeric(Temp_C),
            Farm = farm)  %>%
     add_time_columns() %>%
+    filter(DO >= 0 | is.na(DO)) %>%
     select(DateTime, OverlayTime, Year, Month, Day, Farm, DO, Temp_C)
 }
 
@@ -98,6 +99,16 @@ duml_sal   <- load_sal("DUML_Con_Cleaned.xlsx","DUML")
 nelson_do  <- load_do("Nelson_DO_Cleaned.xlsx","Nelson Bay")
 nelson_ph  <- load_ph("Nelson_pH_Cleaned.xlsx","Nelson Bay")
 nelson_sal <- load_sal("Nelson_Con_Cleaned.xlsx","Nelson Bay")
+
+duml_do_26  <- load_do("DUML_DO_2026.xlsx", "DUML")
+duml_ph_26  <- load_ph("DUML_pH_2026.xlsx", "DUML")
+duml_sal_26 <- load_sal("DUML_Con_2026.xlsx", "DUML")
+
+pil_do_26 <- load_do("PIL_DO_2026.xlsx", "PIL")
+
+moyst_do_26  <- load_do("Moyst_DO_2026.xlsx", "MOF")
+moyst_ph_26  <- load_ph("Moyst_pH_2026.xlsx", "MOF")
+moyst_sal_26 <- load_sal("Moyst_Con_2026.xlsx", "MOF")
 
 load_do_24 <- function(file, farm){
   read_excel(file) %>%
@@ -157,6 +168,18 @@ duml_do_24  <- load_do_24("DOsensor_2024.xlsx", "DUML")
 duml_ph_24  <- load_ph_24("pH_2024.xlsx", "DUML")
 duml_sal_24 <- load_sal_24("Salinity_2024.xlsx", "DUML")
 
+ysi_2026 <- read_excel("YSI_2026.xlsx") %>%
+  mutate(DateTime = ymd_hms(DateTime),
+         Temp_C = as.numeric(Temp_C),
+         Salinity = as.numeric(Sal_ppt),
+         pH = as.numeric(pH),
+         DO = as.numeric(DomgL),
+         Year = year(DateTime),
+         Farm = as.character(Farm),
+         Farm = recode(Farm, "Moyst" = "MOF")) %>%
+  add_time_columns() %>%
+  select(DateTime, OverlayTime, Year, Month, Day, Farm, Temp_C, Salinity, pH, DO)
+
 ysi_2025 <- read_excel("YSI.xlsx") %>%
   mutate(DateTime = ymd_hms(DateTime),
          Temp_C = as.numeric(Temp_C),
@@ -185,53 +208,50 @@ ysi_2024 <- read_excel("YSI_2024.xlsx") %>%
   add_time_columns() %>%
   select(DateTime, OverlayTime, Year, Month, Day, Farm, Temp_C, Salinity, pH, DO)
 
-ysi <- bind_rows(ysi_2025, ysi_2024)
+ysi <- bind_rows(ysi_2026, ysi_2025, ysi_2024)
 
-farm_list  <- c("CMAST","Stump Sound","Ward Creek","DUML","Nelson Bay")
-param_list <- c("Temperature","Dissolved Oxygen","pH","Salinity")
-year_list <- c("2024", "2025")
+farm_list  <- c("CMAST", "Stump Sound", "Ward Creek", "DUML", "Nelson Bay", "PIL", "MOF")
+param_list <- c("Temperature", "Dissolved Oxygen", "pH", "Salinity")
+
+year_list <- c("2024", "2025", "2026")
+
 farm_2024 <- c("CMAST", "DUML")
 farm_2025 <- c("CMAST", "Stump Sound", "Ward Creek", "DUML", "Nelson Bay")
+farm_2026 <- c("DUML", "PIL", "MOF")
 
-colors <- c(
+auto_colors <- c(
+  "#1f77b4",
+  "#cb181d",
+  "#238b45",  
+  "#9467bd",
+  "#ff7f0e",
+  "#17becf",
+  "#8c564b",
+  "#c51b8a",
+  "#bcbd22",
+  "#EE554E",
   
-  # ===== 2024 =====
-  "Temp CMAST 2024" = "#9ecae1",
-  "DO CMAST 2024" = "#fcae91",
-  "pH CMAST 2024" = "#a1d99b",
-  "Salinity CMAST 2024" = "#fcbfd2",
+  "#2171b5",
+  "#a50f15",
+  "#006d2c",
+  "#6a51a3",
+  "#980043",
+  "#1b9e77",
+  "#984ea3",
+  "#2ca02c",
+  "#3182bd",
+  "#de2d26",
   
-  "Temp DUML 2024" = "#fb6a4a",
-  "DO DUML 2024" = "#6baed6",
-  "pH DUML 2024" = "#bcbddc",
-  "Salinity DUML 2024" = "#d9d76e",
-  
-  
-  # ===== 2025 =====
-  "Temp CMAST 2025" = "#2171b5",
-  "DO CMAST 2025" = "#cb181d",
-  "pH CMAST 2025" = "#238b45",
-  "Salinity CMAST 2025" = "#c51b8a",
-  
-  "Temp Stump 2025" = "#6a51a3",
-  "DO Stump 2025" = "#bdbd00",
-  "pH Stump 2025" = "#8c564b",
-  "Salinity Stump 2025" = "#ff7f0e",
-  
-  "Temp Ward 2025" = "#17becf",
-  "DO Ward 2025" = "#ff7f0e",
-  "pH Ward 2025" = "#1b9e77",
-  "Salinity Ward 2025" = "#984ea3",
-  
-  "Temp DUML 2025" = "#d62728",
-  "DO DUML 2025" = "#1f77b4",
-  "pH DUML 2025" = "#9467bd",
-  "Salinity DUML 2025" = "#bcbd22",
-  
-  "Temp Nelson 2025" = "#2ca02c",
-  "DO Nelson 2025" = "#17becf",
-  "pH Nelson 2025" = "#EE554E",
-  "Salinity Nelson 2025" = "#8c564b"
+  "#08519c",
+  "#31a354",
+  "#dd1c77",
+  "#17becf",
+  "#d62728",
+  "#6baed6",
+  "#fb6a4a",
+  "#9ecae1",
+  "#a1d99b",
+  "#bcbddc"  
 )
 
 # UI
@@ -270,26 +290,21 @@ ui <- fluidPage(
       ),
 
       h4("Select Years:"),
-      checkboxGroupInput("year_select", NULL, year_list, selected = "2025"),
-      
-      helpText(
-        style = "font-size: 12px; color: #666666; margin-top: -10px;",
-        "2024 data is only available for DUML and CMAST. Select 2025 to view data from all five farms, or select both years to compare trends at DUML and CMAST."
-      ),
+      checkboxGroupInput("year_select", NULL, year_list, selected = "2026"),
       
       hr(),
       
       h4("Select Farms:"),
-      checkboxGroupInput("farm_select",NULL,farm_list,selected=farm_list),
+      checkboxGroupInput("farm_select", NULL, farm_list, selected = farm_list),
       
       hr(),
       
       h4("Select Parameters:"),
-      checkboxGroupInput("param_select",NULL,param_list,selected=param_list),
+      checkboxGroupInput("param_select", NULL, param_list, selected = param_list),
       
       hr(),
       
-      materialSwitch("show_ysi","Display YSI Data",value=FALSE),
+      materialSwitch("show_ysi", "Display YSI Data", value = FALSE),
       
       hr(),
       
@@ -313,13 +328,11 @@ server <- function(input, output, session){
     
     years <- input$year_select
     
-    available_farms <- if("2024" %in% years){
-      farm_2024
-    } else if("2025" %in% years){
-      farm_2025
-    } else {
-      character(0)
-    }
+    available_farms <- unique(c(
+      if("2024" %in% years) farm_2024,
+      if("2025" %in% years) farm_2025,
+      if("2026" %in% years) farm_2026
+    ))
     
     current_selected <- input$farm_select
     new_selected <- intersect(current_selected, available_farms)
@@ -361,23 +374,24 @@ server <- function(input, output, session){
       }
     }
     
-    # PARAMETERS
     params <- if(length(input$param_select) == length(param_list)){
       "All Parameters"
     } else {
       pretty_list(input$param_select)
     }
     
-    # FARMS
-    farms <- if(setequal(input$farm_select, farm_2025)){
+    available_farms <- unique(c(
+      if("2024" %in% input$year_select) farm_2024,
+      if("2025" %in% input$year_select) farm_2025,
+      if("2026" %in% input$year_select) farm_2026
+    ))
+    
+    farms <- if(setequal(input$farm_select, available_farms)){
       "All Farms"
-    } else if(setequal(input$farm_select, farm_2024)){
-      "CMAST and DUML"
     } else {
       pretty_list(input$farm_select)
     }
     
-    # TIME LABEL
     month_label <- switch(input$month_tabs,
                           "full" = "Full Summer",
                           "5" = "May",
@@ -426,16 +440,24 @@ server <- function(input, output, session){
     p <- plot_ly()
     
     all_y_values <- c()
+  
+    color_index <- 0
+    trace_colors <- list()
     
     add_trace_auto <- function(data, yvar, name, farm_name, color_key){
+      
+      if(is.null(trace_colors[[color_key]])){
+        color_index <<- color_index + 1
+        trace_colors[[color_key]] <<- auto_colors[(color_index - 1) %% length(auto_colors) + 1]
+      }
+      
+      trace_color <- trace_colors[[color_key]]
       
       data_filtered <- filter_time(data, month_val, biweek_val)
       
       if(nrow(data_filtered) > 0 && yvar %in% colnames(data_filtered)){
         
         all_y_values <<- c(all_y_values, data_filtered[[yvar]])
-        
-        trace_color <- unname(colors[color_key])
         
         farm_group <- farm_name
         
@@ -459,10 +481,12 @@ server <- function(input, output, session){
         # YSI
         if(input$show_ysi){
           
+          trace_year <- as.numeric(gsub(".* ", "", color_key))
+          
           ysi_filtered <- ysi %>%
             filter(
-              Farm == gsub(" 2024| 2025", "", farm_name),
-              Year %in% as.numeric(years)
+              Farm == gsub(" 2024| 2025| 2026", "", farm_name),
+              Year == trace_year
             ) %>%
             filter_time(month_val, biweek_val)
           
@@ -533,11 +557,19 @@ server <- function(input, output, session){
         if(show_param("Salinity")) add_trace_auto(duml_sal_24, "Salinity", "Salinity DUML", "DUML", "Salinity DUML 2024")
       }
       
+      
       if("2025" %in% years){
         if(show_param("Temperature")) add_trace_auto(duml_do, "Temp_C", "Temp DUML", "DUML", "Temp DUML 2025")
         if(show_param("Dissolved Oxygen")) add_trace_auto(duml_do, "DO", "DO DUML", "DUML", "DO DUML 2025")
         if(show_param("pH")) add_trace_auto(duml_ph, "pH", "pH DUML", "DUML", "pH DUML 2025")
         if(show_param("Salinity")) add_trace_auto(duml_sal, "Salinity", "Salinity DUML", "DUML", "Salinity DUML 2025")
+      }
+      
+      if("2026" %in% years){
+        if(show_param("Temperature")) add_trace_auto(duml_do_26, "Temp_C", "Temp DUML", "DUML", "Temp DUML 2026")
+        if(show_param("Dissolved Oxygen")) add_trace_auto(duml_do_26, "DO", "DO DUML", "DUML", "DO DUML 2026")
+        if(show_param("pH")) add_trace_auto(duml_ph_26, "pH", "pH DUML", "DUML", "pH DUML 2026")
+        if(show_param("Salinity")) add_trace_auto(duml_sal_26, "Salinity", "Salinity DUML", "DUML", "Salinity DUML 2026")
       }
     }
     
@@ -546,6 +578,18 @@ server <- function(input, output, session){
       if(show_param("Dissolved Oxygen")) add_trace_auto(nelson_do, "DO", "DO Nelson", "Nelson Bay", "DO Nelson 2025")
       if(show_param("pH")) add_trace_auto(nelson_ph, "pH", "pH Nelson", "Nelson Bay", "pH Nelson 2025")
       if(show_param("Salinity")) add_trace_auto(nelson_sal, "Salinity", "Salinity Nelson", "Nelson Bay", "Salinity Nelson 2025")
+    }
+    
+    if("PIL" %in% farms && "2026" %in% years){
+      if(show_param("Temperature")) add_trace_auto(pil_do_26, "Temp_C", "Temp PIL", "PIL", "Temp PIL 2026")
+      if(show_param("Dissolved Oxygen")) add_trace_auto(pil_do_26, "DO", "DO PIL", "PIL", "DO PIL 2026")
+    }
+    
+    if("MOF" %in% farms && "2026" %in% years){
+      if(show_param("Temperature")) add_trace_auto(moyst_do_26, "Temp_C", "Temp MOF", "MOF", "Temp MOF 2026")
+      if(show_param("Dissolved Oxygen")) add_trace_auto(moyst_do_26, "DO", "DO MOF", "MOF", "DO MOF 2026")
+      if(show_param("pH")) add_trace_auto(moyst_ph_26, "pH", "pH MOF", "MOF", "pH MOF 2026")
+      if(show_param("Salinity")) add_trace_auto(moyst_sal_26, "Salinity", "Salinity MOF", "MOF", "Salinity MOF 2026")
     }
     
     # interactive y-axis rescale
@@ -557,7 +601,7 @@ server <- function(input, output, session){
     p %>% layout(
       title = input$custom_title,
       xaxis = list(
-        title = "Date",
+        title = "Date & Time",
         tickformat = "%b %d\n%H:%M",
         hoverformat = "%b %d %H:%M"
       ),
