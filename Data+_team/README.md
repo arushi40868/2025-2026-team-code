@@ -38,7 +38,95 @@ The 18 oyster samples were divided as follows:
 
 ## Repository Structure
 
-*TBA*
+```text
+Data+_team/
+├── Anna/
+│   ├── README.md
+│   ├── RU17_rnaseq_piplin.Rmd
+│   ├── Yale25_rseq_piplin.Rmd
+│   ├── rnaseq_piplin_RU25.Rmd
+│   ├── az_align.sh
+│   ├── az_fastqc.sh
+│   ├── az_fastqc_trim.sh
+│   ├── az_gene_counts.sh
+│   ├── az_mqc_align.sh
+│   ├── az_mqc_trim.sh
+│   ├── az_multifastqc.sh
+│   ├── az_trim.sh
+│   ├── diamond.sh
+│   └── module_1_notes.txt
+│
+├── Arushi/
+│   ├── scripts/
+│   │   ├── 01_fastqc.sh
+│   │   ├── 01_fastqc_singlejob.sh
+│   │   ├── 01_multiqc.sh
+│   │   ├── 02_trim.sh
+│   │   ├── 02_trim_fastqc.sh
+│   │   ├── 02_trim_multiqc.sh
+│   │   ├── 03_alignment.sh
+│   │   ├── 03_alignment_backup.sh
+│   │   ├── 03_alignment_multiqc.sh
+│   │   ├── 03_index.sh
+│   │   ├── 04_featurecounts.sh
+│   │   ├── 06_environmental_regression.Rmd
+│   │   ├── 07_sophie_counts_wgcna_environment.Rmd
+│   │   ├── 08_linear_regression.Rmd
+│   │   ├── rstudio_analysis.Rmd
+│   │   ├── combined_featureCounts_gene_counts.csv
+│   │   ├── environmental_7day_data_quality_summary.csv
+│   │   ├── environmental_events_7day_spline_final.csv
+│   │   ├── environmental_events_7day_validated.csv
+│   │   ├── environmental_traits_7day_by_sample.csv
+│   │   ├── environmental_traits_by_sample.csv
+│   │   ├── environmental_regression_sessionInfo.txt
+│   │   ├── DESeq2_DAF_vs_CMT_Jun_results.csv
+│   │   ├── DESeq2_DAF_vs_CMT_Jul_results.csv
+│   │   ├── DESeq2_DAF_vs_CMT_Aug_results.csv
+│   │   ├── DESeq2_pairwise_monthly_summary.csv
+│   │   ├── DESeq2_DAF_vs_CMT_heatmap.png
+│   │   ├── volcano_CMT_vs_DAF_June_candidate_genes.png
+│   │   ├── GO_mapping_summary.csv
+│   │   ├── GO_enrichment_DAF_vs_CMT_Jun.csv
+│   │   ├── GO_enrichment_DAF_vs_CMT_Jul.csv
+│   │   ├── GO_enrichment_DAF_vs_CMT_Aug.csv
+│   │   ├── GO_dotplot_DAF_vs_CMT_Jul.pdf
+│   │   ├── GO_dotplot_RELAXED_DAF_vs_CMT_Jun.pdf
+│   │   ├── WGCNA_gene_modules.csv
+│   │   ├── WGCNA_big_corrected_module_trait_heatmap_spline.pdf
+│   │   ├── WGCNA_big_corrected_module_trait_results_spline.csv
+│   │   ├── WGCNA_corrected_primary_environment_heatmap.pdf
+│   │   ├── WGCNA_corrected_primary_environment_results.csv
+│   │   ├── WGCNA_corrected_primary_module_regressions.csv
+│   │   ├── WGCNA_candidate_module_models.rds
+│   │   ├── WGCNA_corrected_module_eigengenes.rds
+│   │   ├── WGCNA_event_level_module_eigengenes.rds
+│   │   ├── oyster_deseq2_vst.rds
+│   │   └── MEblack_vs_precipitation_7day.png
+│   ├── Notes.txt
+│   ├── README.md
+│   └── xRNA for BC Summer 2024.xlsx
+│
+├── Sophie/
+│   ├── README.md
+│   ├── alignment.sh
+│   ├── alignment_multiqc.sh
+│   ├── deseq2.Rmd
+│   ├── diamond.sh
+│   ├── fastqc.sh
+│   ├── gene_counts.sh
+│   ├── genome_comparison.Rmd
+│   ├── goseq.Rmd
+│   ├── multiqc.sh
+│   ├── trim.sh
+│   ├── trimmed_fastqc.sh
+│   ├── trimmed_multiqc.sh
+│   ├── week_one_notes.txt
+│   └── wgcna.Rmd
+│
+├── Gitconnect.txt
+└── README.md
+```
 
 ## Tools Used
 
