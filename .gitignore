@@ -2,3 +2,27 @@
 .Rhistory
 .RData
 .Ruserdata
+
+# Arushi RNA-seq raw and intermediate files
+Data+_team/Arushi/aligned_bam/
+Data+_team/Arushi/fastqc_raw/
+Data+_team/Arushi/fastqc_trimmed/
+Data+_team/Arushi/featureCounts_counts/
+Data+_team/Arushi/logs/
+Data+_team/Arushi/multiqc_report_alignment/
+Data+_team/Arushi/multiqc_report_raw/
+Data+_team/Arushi/multiqc_report_trimmed/
+Data+_team/Arushi/trimmedreads/
+
+# Generated R Markdown files
+Data+_team/Arushi/scripts/*.html
+Data+_team/Arushi/scripts/*.nb.html
+Data+_team/Arushi/scripts/*.tex
+Data+_team/Arushi/scripts/*_files/
+
+# Generated R objects
+Data+_team/Arushi/scripts/*.rds
+Data+_team/Arushi/scripts/*.RData
+
+# Rendered reports rather than individual final figures
+Data+_team/Arushi/scripts/06_environmental_regression.pdf

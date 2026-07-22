@@ -1,0 +1,7 @@
+"event_id","location","station","month","date_collected","temperature_days_used","salinity_days_used","salinity_coverage","salinity_quality","conductivity_days_used","conductivity_coverage","conductivity_quality","DO_days_used","pH_days_used","pH_coverage","pH_quality","precipitation_days_used"
+"CMT_20240620","CMT","CMAST","Jun",2024-06-20,7,7,1,"complete_7_of_7",7,1,"complete_7_of_7",7,7,1,"complete_7_of_7",7
+"DAF_20240621","DAF","DUML","Jun",2024-06-21,7,4,0.571428571428571,"partial_at_least_half",4,0.571428571428571,"partial_at_least_half",7,7,1,"complete_7_of_7",7
+"CMT_20240722","CMT","CMAST","Jul",2024-07-22,7,3,0.428571428571429,"partial_under_half",3,0.428571428571429,"partial_under_half",7,5,0.714285714285714,"partial_at_least_half",7
+"DAF_20240723","DAF","DUML","Jul",2024-07-23,7,3,0.428571428571429,"partial_under_half",3,0.428571428571429,"partial_under_half",7,7,1,"complete_7_of_7",7
+"CMT_20240819","CMT","CMAST","Aug",2024-08-19,7,7,1,"complete_7_of_7",7,1,"complete_7_of_7",7,0,0,"no_data",7
+"DAF_20240820","DAF","DUML","Aug",2024-08-20,7,7,1,"complete_7_of_7",7,1,"complete_7_of_7",7,7,1,"complete_7_of_7",7

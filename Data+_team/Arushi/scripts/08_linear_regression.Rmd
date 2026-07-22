@@ -1,0 +1,2036 @@
+---
+title: "Linear Regression"
+output: html_notebook
+---
+
+**LINEAR REGRESSION ON THE MODULE**
+
+Step 1: Confirm the regression dataset
+
+```{r}
+# Load required libraries
+library(tidyverse)
+library(broom)
+
+# Check that the event-level modeling table exists
+exists("big_environment_traits")
+
+# Inspect its size and structure
+dim(big_environment_traits)
+names(big_environment_traits)
+dplyr::glimpse(big_environment_traits)
+```
+
+```{r}
+# Inspect the variables needed for our planned regression models
+big_environment_traits %>%
+  dplyr::select(
+    dplyr::any_of(
+      c(
+        "event_id",
+        "location",
+        "month",
+        "MEblack",
+        "salinity_7d_spline_mean",
+        "conductivity_7d_spline_mean",
+        "MEyellow",
+        "DO_7d_mean",
+        "MEgreen"
+      )
+    )
+  )
+```
+
+Step 2: Locate the module eigengene table
+
+```{r}
+# Find objects containing module eigengene columns such as MEblack
+object_names <- ls()
+
+objects_with_ME <- object_names[
+  vapply(
+    object_names,
+    function(object_name) {
+      object <- get(object_name, envir = .GlobalEnv)
+      column_names <- colnames(object)
+
+      (is.data.frame(object) || is.matrix(object)) &&
+        !is.null(column_names) &&
+        any(grepl("^ME", column_names))
+    },
+    logical(1)
+  )
+]
+
+# Show the matching object names
+objects_with_ME
+
+# Summarize their dimensions and eigengene columns
+purrr::map_dfr(
+  objects_with_ME,
+  function(object_name) {
+    object <- get(object_name, envir = .GlobalEnv)
+
+    tibble::tibble(
+      object = object_name,
+      rows = nrow(object),
+      columns = ncol(object),
+      ME_columns = paste(
+        grep("^ME", colnames(object), value = TRUE),
+        collapse = ", "
+      )
+    )
+  }
+)
+```
+
+Step 3: Identify the correct six-event eigengene object
+
+```{r}
+candidate_objects <- c(
+  "event_level_eigengenes_sophie",
+  "eigengene_matrix_event_sophie",
+  "event_module_eigengenes",
+  "big_wgcna_event_data"
+)
+
+for (object_name in candidate_objects) {
+
+  if (exists(object_name)) {
+
+    object <- get(object_name)
+
+    cat("\n-----------------------------------\n")
+    cat("Object:", object_name, "\n")
+    cat("Class:", paste(class(object), collapse = ", "), "\n")
+    cat(
+      "Dimensions:",
+      paste(dim(object), collapse = " x "),
+      "\n"
+    )
+
+    cat("Module eigengene columns:\n")
+    print(
+      colnames(object)[
+        startsWith(colnames(object), "ME")
+      ]
+    )
+
+    cat("Identifier columns:\n")
+    print(
+      intersect(
+        c("event_id", "location", "month"),
+        colnames(object)
+      )
+    )
+
+    cat("First row names:\n")
+    print(head(rownames(object)))
+  }
+}
+```
+
+Step 4: Build the regression-ready table
+
+```{r}
+# Create one clean table for the planned regression analyses
+regression_data <- big_wgcna_event_data %>%
+  dplyr::transmute(
+    event_id,
+    location = factor(
+      location,
+      levels = c("CMT", "DAF")
+    ),
+    month = factor(
+      month,
+      levels = c("Jun", "Jul", "Aug")
+    ),
+
+    # Primary MEblack analysis
+    MEblack,
+    salinity_7d_spline_mean,
+    conductivity_7d_spline_mean,
+
+    # Secondary analyses
+    MEyellow,
+    DO_7d_mean,
+    MEgreen
+  ) %>%
+  dplyr::arrange(month, location)
+
+# Display the complete regression dataset
+regression_data
+```
+
+```{r}
+# Confirm dimensions and event uniqueness
+dim(regression_data)
+
+regression_data %>%
+  dplyr::summarise(
+    rows = dplyr::n(),
+    unique_events = dplyr::n_distinct(event_id),
+    duplicate_events = dplyr::n() - dplyr::n_distinct(event_id)
+  )
+
+# Count missing values in every variable
+regression_data %>%
+  dplyr::summarise(
+    dplyr::across(
+      dplyr::everything(),
+      ~ sum(is.na(.))
+    )
+  )
+```
+
+Step 5: Plot MEblack against salinity
+
+```{r}
+# Labeled six-event scatterplot:
+# MEblack versus 7-day spline-estimated salinity
+
+MEblack_salinity_plot <- regression_data %>%
+  ggplot(
+    aes(
+      x = salinity_7d_spline_mean,
+      y = MEblack
+    )
+  ) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x,
+    se = TRUE,
+    linewidth = 0.8
+  ) +
+  geom_point(
+    aes(
+      shape = location,
+      fill = month
+    ),
+    size = 4
+  ) +
+  geom_text(
+    aes(label = event_id),
+    nudge_y = 0.025,
+    check_overlap = TRUE,
+    size = 3
+  ) +
+  labs(
+    title = "MEblack association with salinity",
+    subtitle = "Six independent location–month collection events",
+    x = "7-day mean salinity (spline-estimated)",
+    y = "MEblack module eigengene",
+    shape = "Location",
+    fill = "Month"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+MEblack_salinity_plot
+```
+
+lower salinity corresponds to higher `MEblack` eigengene values.
+
+Step 6: Fit the primary salinity model
+
+```{r}
+
+# Primary regression model
+MEblack_salinity_model <- lm(
+  MEblack ~ salinity_7d_spline_mean,
+  data = regression_data
+)
+
+# Standard model summary
+summary(MEblack_salinity_model)
+```
+
+```{r}
+# Coefficient estimate, p-value, and 95% confidence interval
+MEblack_salinity_coefficients <- broom::tidy(
+  MEblack_salinity_model,
+  conf.int = TRUE,
+  conf.level = 0.95
+)
+
+MEblack_salinity_coefficients
+```
+
+```{r}
+# Model-level fit statistics
+MEblack_salinity_fit <- broom::glance(
+  MEblack_salinity_model
+)
+
+# Calculate AICc for the small sample size
+n_model <- nobs(MEblack_salinity_model)
+k_model <- attr(logLik(MEblack_salinity_model), "df")
+
+MEblack_salinity_AICc <-
+  AIC(MEblack_salinity_model) +
+  (2 * k_model * (k_model + 1)) /
+  (n_model - k_model - 1)
+
+MEblack_salinity_fit %>%
+  dplyr::transmute(
+    n = nobs,
+    R_squared = r.squared,
+    adjusted_R_squared = adj.r.squared,
+    residual_standard_error = sigma,
+    F_statistic = statistic,
+    model_p_value = p.value,
+    AIC = AIC,
+    AICc = MEblack_salinity_AICc
+  )
+```
+
+So, within these six collection events, a one-unit increase in the 7-day mean salinity is associated with an estimated **0.0747-unit decrease in the MEblack eigengene value**.
+
+Salinity explains approximately **99.2% of the observed variation in MEblack across these six events**.
+
+Step 7: Check influence and outliers
+
+```{r}
+# Influence diagnostics for the MEblack–salinity model
+
+n_events <- nobs(MEblack_salinity_model)
+n_parameters <- length(coef(MEblack_salinity_model))
+
+cook_cutoff <- 4 / n_events
+leverage_cutoff <- 2 * n_parameters / n_events
+
+MEblack_salinity_diagnostics <- regression_data %>%
+  dplyr::mutate(
+    fitted_value = fitted(MEblack_salinity_model),
+    residual = resid(MEblack_salinity_model),
+    standardized_residual = rstandard(MEblack_salinity_model),
+    studentized_residual = rstudent(MEblack_salinity_model),
+    leverage = hatvalues(MEblack_salinity_model),
+    cooks_distance = cooks.distance(MEblack_salinity_model)
+  ) %>%
+  dplyr::mutate(
+    large_residual = abs(studentized_residual) > 2,
+    high_leverage = leverage > leverage_cutoff,
+    high_cooks_distance = cooks_distance > cook_cutoff
+  ) %>%
+  dplyr::select(
+    event_id,
+    location,
+    month,
+    salinity_7d_spline_mean,
+    MEblack,
+    fitted_value,
+    residual,
+    studentized_residual,
+    leverage,
+    cooks_distance,
+    large_residual,
+    high_leverage,
+    high_cooks_distance
+  ) %>%
+  dplyr::arrange(dplyr::desc(cooks_distance))
+
+MEblack_salinity_diagnostics
+
+cat("Cook's distance reference cutoff:", cook_cutoff, "\n")
+cat("Leverage reference cutoff:", leverage_cutoff, "\n")
+```
+
+Step 8: Leave one event out
+
+```{r}
+# Full-model slope for comparison
+full_salinity_slope <- unname(
+  coef(MEblack_salinity_model)[["salinity_7d_spline_mean"]]
+)
+
+# Refit the model six times, omitting one event each time
+MEblack_salinity_LOEO <- purrr::map_dfr(
+  regression_data$event_id,
+  function(event_removed) {
+
+    loo_data <- regression_data %>%
+      dplyr::filter(event_id != event_removed)
+
+    loo_model <- lm(
+      MEblack ~ salinity_7d_spline_mean,
+      data = loo_data
+    )
+
+    coefficient_results <- broom::tidy(
+      loo_model,
+      conf.int = TRUE,
+      conf.level = 0.95
+    ) %>%
+      dplyr::filter(
+        term == "salinity_7d_spline_mean"
+      )
+
+    fit_results <- broom::glance(loo_model)
+
+    n_loo <- nobs(loo_model)
+    k_loo <- attr(logLik(loo_model), "df")
+
+    AICc_loo <-
+      AIC(loo_model) +
+      (2 * k_loo * (k_loo + 1)) /
+      (n_loo - k_loo - 1)
+
+    tibble::tibble(
+      omitted_event = event_removed,
+      n = n_loo,
+      salinity_slope = coefficient_results$estimate,
+      conf_low = coefficient_results$conf.low,
+      conf_high = coefficient_results$conf.high,
+      p_value = coefficient_results$p.value,
+      R_squared = fit_results$r.squared,
+      adjusted_R_squared = fit_results$adj.r.squared,
+      AICc = AICc_loo,
+      absolute_slope_change_percent =
+        100 * abs(
+          (coefficient_results$estimate - full_salinity_slope) /
+            full_salinity_slope
+        ),
+      slope_remains_negative =
+        coefficient_results$estimate < 0,
+      CI_excludes_zero =
+        coefficient_results$conf.high < 0
+    )
+  }
+)
+
+MEblack_salinity_LOEO
+```
+
+August DAF event strengthens the pattern, but it is **not creating the relationship by itself**.
+
+Step 9: Visualize MEblack across months
+
+```{r}
+MEblack_month_plot <- regression_data %>%
+  ggplot(
+    aes(
+      x = month,
+      y = MEblack
+    )
+  ) +
+  geom_line(
+    aes(
+      group = location,
+      linetype = location
+    ),
+    linewidth = 0.8
+  ) +
+  geom_point(
+    aes(
+      shape = location
+    ),
+    size = 4
+  ) +
+  geom_text(
+    aes(label = event_id),
+    nudge_y = 0.025,
+    check_overlap = TRUE,
+    size = 3
+  ) +
+  stat_summary(
+    aes(group = 1),
+    fun = mean,
+    geom = "point",
+    shape = 18,
+    size = 5
+  ) +
+  labs(
+    title = "MEblack eigengene expression across months",
+    subtitle = "Points represent six independent location–month events; diamonds show monthly means",
+    x = "Collection month",
+    y = "MEblack module eigengene",
+    shape = "Location",
+    linetype = "Location"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+MEblack_month_plot
+```
+
+Step 10: Fit MEblack \~ month
+
+```{r}
+# Temporal comparison model
+MEblack_month_model <- lm(
+  MEblack ~ month,
+  data = regression_data
+)
+
+summary(MEblack_month_model)
+```
+
+```{r}
+# Month coefficients, p-values, and 95% confidence intervals
+MEblack_month_coefficients <- broom::tidy(
+  MEblack_month_model,
+  conf.int = TRUE,
+  conf.level = 0.95
+)
+
+MEblack_month_coefficients
+```
+
+```{r}
+# Overall month-model fit
+MEblack_month_fit <- broom::glance(
+  MEblack_month_model
+)
+
+# Small-sample corrected AIC
+n_month <- nobs(MEblack_month_model)
+k_month <- attr(logLik(MEblack_month_model), "df")
+
+MEblack_month_AICc <-
+  AIC(MEblack_month_model) +
+  (2 * k_month * (k_month + 1)) /
+  (n_month - k_month - 1)
+
+MEblack_month_fit %>%
+  dplyr::transmute(
+    n = nobs,
+    R_squared = r.squared,
+    adjusted_R_squared = adj.r.squared,
+    residual_standard_error = sigma,
+    F_statistic = statistic,
+    model_p_value = p.value,
+    AIC = AIC,
+    AICc = MEblack_month_AICc
+  )
+```
+
+Step 11: Directly compare salinity and month
+
+```{r}
+# Compare the two candidate explanations for MEblack
+MEblack_model_comparison <- tibble::tibble(
+  model = c(
+    "Salinity",
+    "Month"
+  ),
+  formula = c(
+    "MEblack ~ salinity_7d_spline_mean",
+    "MEblack ~ month"
+  ),
+  n = c(
+    nobs(MEblack_salinity_model),
+    nobs(MEblack_month_model)
+  ),
+  estimated_parameters = c(
+    attr(logLik(MEblack_salinity_model), "df"),
+    attr(logLik(MEblack_month_model), "df")
+  ),
+  R_squared = c(
+    summary(MEblack_salinity_model)$r.squared,
+    summary(MEblack_month_model)$r.squared
+  ),
+  adjusted_R_squared = c(
+    summary(MEblack_salinity_model)$adj.r.squared,
+    summary(MEblack_month_model)$adj.r.squared
+  ),
+  residual_standard_error = c(
+    sigma(MEblack_salinity_model),
+    sigma(MEblack_month_model)
+  ),
+  model_p_value = c(
+    broom::glance(MEblack_salinity_model)$p.value,
+    broom::glance(MEblack_month_model)$p.value
+  ),
+  AIC = c(
+    AIC(MEblack_salinity_model),
+    AIC(MEblack_month_model)
+  ),
+  AICc = c(
+    MEblack_salinity_AICc,
+    MEblack_month_AICc
+  )
+) %>%
+  dplyr::mutate(
+    delta_AICc = AICc - min(AICc)
+  ) %>%
+  dplyr::arrange(delta_AICc)
+
+MEblack_model_comparison
+```
+
+Step 12: Check conductivity against salinity
+
+```{r}
+# Quantify the relationship between salinity and conductivity
+salinity_conductivity_correlation <- regression_data %>%
+  dplyr::summarise(
+    n = sum(
+      complete.cases(
+        salinity_7d_spline_mean,
+        conductivity_7d_spline_mean
+      )
+    ),
+    Pearson_r = cor(
+      salinity_7d_spline_mean,
+      conductivity_7d_spline_mean,
+      use = "complete.obs",
+      method = "pearson"
+    ),
+    Spearman_r = cor(
+      salinity_7d_spline_mean,
+      conductivity_7d_spline_mean,
+      use = "complete.obs",
+      method = "spearman"
+    )
+  )
+
+salinity_conductivity_correlation
+```
+
+```{r}
+salinity_conductivity_plot <- regression_data %>%
+  ggplot(
+    aes(
+      x = salinity_7d_spline_mean,
+      y = conductivity_7d_spline_mean
+    )
+  ) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x,
+    se = TRUE,
+    linewidth = 0.8
+  ) +
+  geom_point(
+    aes(shape = location),
+    size = 4
+  ) +
+  geom_text(
+    aes(label = event_id),
+    nudge_y = 250,
+    check_overlap = TRUE,
+    size = 3
+  ) +
+  labs(
+    title = "Relationship between salinity and conductivity",
+    subtitle = "Six independent location–month collection events",
+    x = "7-day mean salinity (spline-estimated)",
+    y = "7-day mean conductivity (spline-estimated)",
+    shape = "Location"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+salinity_conductivity_plot
+```
+
+Step 13: Fit the conductivity sensitivity model
+
+```{r}
+# Rescale conductivity for an interpretable coefficient
+regression_data <- regression_data %>%
+  dplyr::mutate(
+    conductivity_7d_spline_per_1000 =
+      conductivity_7d_spline_mean / 1000
+  )
+
+# Conductivity sensitivity model
+MEblack_conductivity_model <- lm(
+  MEblack ~ conductivity_7d_spline_per_1000,
+  data = regression_data
+)
+
+summary(MEblack_conductivity_model)
+```
+
+```{r}
+MEblack_conductivity_coefficients <- broom::tidy(
+  MEblack_conductivity_model,
+  conf.int = TRUE,
+  conf.level = 0.95
+)
+
+MEblack_conductivity_coefficients
+```
+
+```{r}
+MEblack_conductivity_fit <- broom::glance(
+  MEblack_conductivity_model
+)
+
+n_conductivity <- nobs(MEblack_conductivity_model)
+k_conductivity <- attr(
+  logLik(MEblack_conductivity_model),
+  "df"
+)
+
+MEblack_conductivity_AICc <-
+  AIC(MEblack_conductivity_model) +
+  (2 * k_conductivity * (k_conductivity + 1)) /
+  (n_conductivity - k_conductivity - 1)
+
+MEblack_conductivity_fit %>%
+  dplyr::transmute(
+    n = nobs,
+    R_squared = r.squared,
+    adjusted_R_squared = adj.r.squared,
+    residual_standard_error = sigma,
+    F_statistic = statistic,
+    model_p_value = p.value,
+    AIC = AIC,
+    AICc = MEblack_conductivity_AICc
+  )
+```
+
+Step 14: Fit salinity plus location
+
+```{r}
+
+# Salinity model adjusted for location
+MEblack_salinity_location_model <- lm(
+  MEblack ~ salinity_7d_spline_mean + location,
+  data = regression_data
+)
+
+summary(MEblack_salinity_location_model)
+```
+
+```{r}
+MEblack_salinity_location_coefficients <- broom::tidy(
+  MEblack_salinity_location_model,
+  conf.int = TRUE,
+  conf.level = 0.95
+)
+
+MEblack_salinity_location_coefficients
+```
+
+After accounting for salinity, there was no detectable additional association between location and MEblack.
+
+Step 15: Formally compare the nested models
+
+```{r}
+# Does adding location significantly improve the salinity-only model?
+MEblack_salinity_location_test <- anova(
+  MEblack_salinity_model,
+  MEblack_salinity_location_model
+)
+
+MEblack_salinity_location_test
+```
+
+```{r}
+# Fit statistics for the salinity + location model
+MEblack_salinity_location_fit <- broom::glance(
+  MEblack_salinity_location_model
+)
+
+n_sal_location <- nobs(MEblack_salinity_location_model)
+
+k_sal_location <- attr(
+  logLik(MEblack_salinity_location_model),
+  "df"
+)
+
+MEblack_salinity_location_AICc <-
+  AIC(MEblack_salinity_location_model) +
+  (
+    2 * k_sal_location * (k_sal_location + 1)
+  ) /
+  (
+    n_sal_location - k_sal_location - 1
+  )
+
+# Compare the simple and adjusted models
+MEblack_salinity_location_comparison <- tibble::tibble(
+  model = c(
+    "Salinity only",
+    "Salinity + location"
+  ),
+  R_squared = c(
+    summary(MEblack_salinity_model)$r.squared,
+    summary(MEblack_salinity_location_model)$r.squared
+  ),
+  adjusted_R_squared = c(
+    summary(MEblack_salinity_model)$adj.r.squared,
+    summary(MEblack_salinity_location_model)$adj.r.squared
+  ),
+  residual_standard_error = c(
+    sigma(MEblack_salinity_model),
+    sigma(MEblack_salinity_location_model)
+  ),
+  AIC = c(
+    AIC(MEblack_salinity_model),
+    AIC(MEblack_salinity_location_model)
+  ),
+  AICc = c(
+    MEblack_salinity_AICc,
+    MEblack_salinity_location_AICc
+  )
+) %>%
+  dplyr::mutate(
+    delta_AICc = AICc - min(AICc)
+  )
+
+MEblack_salinity_location_comparison
+```
+
+Step 16: Plot MEyello against dissolved oxygen
+
+```{r}
+# Labeled six-event scatterplot:
+# MEyellow versus 7-day mean dissolved oxygen
+
+MEyellow_DO_plot <- regression_data %>%
+  ggplot(
+    aes(
+      x = DO_7d_mean,
+      y = MEyellow
+    )
+  ) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x,
+    se = TRUE,
+    linewidth = 0.8
+  ) +
+  geom_point(
+    aes(
+      shape = location,
+      fill = month
+    ),
+    size = 4
+  ) +
+  geom_text(
+    aes(label = event_id),
+    nudge_y = 0.025,
+    check_overlap = TRUE,
+    size = 3
+  ) +
+  labs(
+    title = "MEyellow association with dissolved oxygen",
+    subtitle = "Six independent location–month collection events",
+    x = "7-day mean dissolved oxygen",
+    y = "MEyellow module eigengene",
+    shape = "Location",
+    fill = "Month"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+MEyellow_DO_plot
+```
+
+Step 17: Plot MEgreen across months
+
+```{r}
+# Examine the temporal pattern in MEgreen
+
+MEgreen_month_plot <- regression_data %>%
+  ggplot(
+    aes(
+      x = month,
+      y = MEgreen
+    )
+  ) +
+  geom_line(
+    aes(
+      group = location,
+      linetype = location
+    ),
+    linewidth = 0.8
+  ) +
+  geom_point(
+    aes(shape = location),
+    size = 4
+  ) +
+  geom_text(
+    aes(label = event_id),
+    nudge_y = 0.025,
+    check_overlap = TRUE,
+    size = 3
+  ) +
+  stat_summary(
+    aes(group = 1),
+    fun = mean,
+    geom = "point",
+    shape = 18,
+    size = 5
+  ) +
+  labs(
+    title = "MEgreen eigengene expression across months",
+    subtitle = paste(
+      "Points represent six independent location–month events;",
+      "diamonds show monthly means"
+    ),
+    x = "Collection month",
+    y = "MEgreen module eigengene",
+    shape = "Location",
+    linetype = "Location"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+MEgreen_month_plot
+```
+
+```{r}
+MEgreen_month_model <- lm(
+  MEgreen ~ month,
+  data = regression_data
+)
+
+summary(MEgreen_month_model)
+```
+
+```{r}
+MEgreen_month_coefficients <- broom::tidy(
+  MEgreen_month_model,
+  conf.int = TRUE,
+  conf.level = 0.95
+)
+
+MEgreen_month_coefficients
+```
+
+```{r}
+MEgreen_month_fit <- broom::glance(
+  MEgreen_month_model
+)
+
+n_green <- nobs(MEgreen_month_model)
+
+k_green <- attr(
+  logLik(MEgreen_month_model),
+  "df"
+)
+
+MEgreen_month_AICc <-
+  AIC(MEgreen_month_model) +
+  (
+    2 * k_green * (k_green + 1)
+  ) /
+  (
+    n_green - k_green - 1
+  )
+
+MEgreen_month_fit %>%
+  dplyr::transmute(
+    n = nobs,
+    R_squared = r.squared,
+    adjusted_R_squared = adj.r.squared,
+    residual_standard_error = sigma,
+    F_statistic = statistic,
+    model_p_value = p.value,
+    AIC = AIC,
+    AICc = MEgreen_month_AICc
+  )
+```
+
+Step 18: MEturquoise with pH
+
+```{r}
+# Build the complete-case dataset for MEturquoise and pH
+MEturquoise_pH_data <- big_wgcna_event_data %>%
+  dplyr::select(
+    event_id,
+    location,
+    month,
+    MEturquoise,
+    pH_7d_available_mean
+  ) %>%
+  tidyr::drop_na(
+    MEturquoise,
+    pH_7d_available_mean
+  )
+
+MEturquoise_pH_data
+
+# Confirm which event is missing pH
+big_wgcna_event_data %>%
+  dplyr::filter(is.na(pH_7d_available_mean)) %>%
+  dplyr::select(
+    event_id,
+    location,
+    month,
+    pH_7d_available_mean
+  )
+```
+
+```{r}
+MEturquoise_pH_plot <- MEturquoise_pH_data %>%
+  ggplot(
+    aes(
+      x = pH_7d_available_mean,
+      y = MEturquoise
+    )
+  ) +
+  geom_smooth(
+    method = "lm",
+    formula = y ~ x,
+    se = TRUE,
+    linewidth = 0.8
+  ) +
+  geom_point(
+    aes(
+      shape = location
+    ),
+    size = 4
+  ) +
+  geom_text(
+    aes(label = event_id),
+    nudge_y = 0.018,
+    check_overlap = TRUE,
+    size = 3
+  ) +
+  labs(
+    title = "MEturquoise association with pH",
+    subtitle = "Five complete location–month events; CMT August is missing pH",
+    x = "7-day mean pH",
+    y = "MEturquoise module eigengene",
+    shape = "Location"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+MEturquoise_pH_plot
+```
+
+**GO ENRICHMENT ON MEBlack**
+
+Step 1: A few checks
+
+```{r}
+# Find likely gene-to-module assignment objects
+grep(
+  pattern = "module|color|gene",
+  x = ls(),
+  ignore.case = TRUE,
+  value = TRUE
+)
+```
+
+```{r}
+# Check whether common WGCNA module-label objects exist
+c(
+  module_colors = exists("module_colors"),
+  moduleColors = exists("moduleColors"),
+  mergedColors = exists("mergedColors"),
+  dynamicColors = exists("dynamicColors"),
+  gene_modules = exists("gene_modules"),
+  module_assignments = exists("module_assignments")
+)
+```
+
+```{r}
+# Inspect the existing gene-to-module assignment object
+class(gene_modules)
+dim(gene_modules)
+names(gene_modules)
+
+head(gene_modules, 10)
+
+str(gene_modules)
+```
+
+```{r}
+# Inspect the module-color object
+class(module_colors)
+length(module_colors)
+
+head(module_colors, 10)
+head(names(module_colors), 10)
+
+table(module_colors, useNA = "ifany")
+```
+
+```{r}
+library(tidyverse)
+library(goseq)
+
+gene2cat_path <- paste0(
+  "/work/clh162/Data+/Sophie/",
+  "2025-2026-team-code-sac165/",
+  "Data+_team/Sophie/gene2cat.rds"
+)
+
+# Confirm that the file exists
+file.exists(gene2cat_path)
+
+# Load the gene-to-GO mapping
+gene2cat <- readRDS(gene2cat_path)
+
+# Inspect its structure
+class(gene2cat)
+dim(gene2cat)
+names(gene2cat)
+head(gene2cat, 10)
+str(gene2cat)
+```
+
+```{r}
+# Convert both mapping columns to character
+gene2cat <- gene2cat %>%
+  dplyr::mutate(
+    dplyr::across(
+      dplyr::everything(),
+      as.character
+    )
+  )
+
+# GOseq expects the first column to contain gene IDs
+annotation_gene_ids <- unique(gene2cat[[1]])
+annotation_GO_ids <- unique(gene2cat[[2]])
+
+gene2cat_coverage <- tibble::tibble(
+  total_gene_GO_mappings = nrow(gene2cat),
+  unique_annotated_genes = length(annotation_gene_ids),
+  unique_GO_terms = length(annotation_GO_ids),
+
+  WGCNA_genes_with_GO = sum(
+    module_gene_table_final$gene_id %in%
+      annotation_gene_ids
+  ),
+
+  total_WGCNA_genes = nrow(
+    module_gene_table_final
+  ),
+
+  MEblack_genes_with_GO = sum(
+    MEblack_genes$gene_id %in%
+      annotation_gene_ids
+  ),
+
+  total_MEblack_genes = nrow(
+    MEblack_genes
+  )
+)
+
+gene2cat_coverage
+```
+
+```{r}
+diamond_path <- paste0(
+  "/work/clh162/Data+/Sophie/",
+  "2025-2026-team-code-sac165/",
+  "Data+_team/Sophie/diamond_result_matches.tsv"
+)
+
+file.exists(diamond_path)
+
+diamond_raw <- readr::read_tsv(
+  diamond_path,
+  col_names = FALSE,
+  show_col_types = FALSE
+)
+
+class(diamond_raw)
+dim(diamond_raw)
+head(diamond_raw, 10)
+```
+
+```{r}
+# Check which DIAMOND column contains the current evm.TU gene IDs
+diamond_column_overlap <- purrr::map_dfr(
+  names(diamond_raw),
+  function(column_name) {
+    values <- as.character(diamond_raw[[column_name]])
+
+    tibble::tibble(
+      column = column_name,
+      WGCNA_gene_matches = sum(
+        unique(module_gene_table_final$gene_id) %in% values
+      ),
+      MEblack_gene_matches = sum(
+        unique(MEblack_genes$gene_id) %in% values
+      ),
+      GO_annotation_gene_matches = sum(
+        unique(values) %in% annotation_gene_ids
+      ),
+      example_value = dplyr::first(values)
+    )
+  }
+)
+
+diamond_column_overlap
+```
+
+Step 2: Extract MEBlack Genes
+
+```{r}
+# Convert the final named WGCNA module vector into a clean table
+module_gene_table_final <- tibble::tibble(
+  gene_id = names(module_colors),
+  module = as.character(module_colors)
+)
+
+# Check that every gene appears once
+module_gene_table_final %>%
+  dplyr::summarise(
+    total_rows = dplyr::n(),
+    unique_gene_ids = dplyr::n_distinct(gene_id),
+    duplicate_gene_ids =
+      dplyr::n() - dplyr::n_distinct(gene_id)
+  )
+
+# Confirm module sizes
+module_gene_table_final %>%
+  dplyr::count(module, sort = TRUE)
+
+# Extract the black-module genes
+MEblack_genes <- module_gene_table_final %>%
+  dplyr::filter(module == "black") %>%
+  dplyr::arrange(gene_id)
+
+# Confirm and preview
+nrow(MEblack_genes)
+head(MEblack_genes, 15)
+```
+
+Step 3: Create a bridge between Diamond IDs to WGCNA IDs
+
+```{r}
+# Create a candidate bridge from the DIAMOND IDs to our WGCNA IDs
+diamond_bridge <- diamond_raw %>%
+  dplyr::transmute(
+    diamond_gene_id = X1,
+
+    # Test whether only the prefix differs
+    gene_id = stringr::str_replace(
+      X1,
+      "^evm\\.model\\.",
+      "evm.TU."
+    ),
+
+    protein_accession = X2,
+    percent_identity = X3,
+    alignment_length = X4,
+    e_value = X11,
+    bit_score = X12
+  )
+
+# Check overlap after changing evm.model.* to evm.TU.*
+diamond_prefix_check <- tibble::tibble(
+  diamond_rows = nrow(diamond_bridge),
+
+  direct_WGCNA_matches = sum(
+    diamond_bridge$diamond_gene_id %in%
+      module_gene_table_final$gene_id
+  ),
+
+  normalized_WGCNA_matches = sum(
+    diamond_bridge$gene_id %in%
+      module_gene_table_final$gene_id
+  ),
+
+  normalized_MEblack_matches = sum(
+    diamond_bridge$gene_id %in%
+      MEblack_genes$gene_id
+  ),
+
+  total_WGCNA_genes = nrow(module_gene_table_final),
+  total_MEblack_genes = nrow(MEblack_genes)
+)
+
+diamond_prefix_check
+```
+
+```{r}
+# Preview MEblack genes that successfully match DIAMOND proteins
+MEblack_diamond_matches <- MEblack_genes %>%
+  dplyr::left_join(
+    diamond_bridge,
+    by = "gene_id"
+  )
+
+MEblack_diamond_matches %>%
+  dplyr::select(
+    gene_id,
+    protein_accession,
+    percent_identity,
+    e_value,
+    bit_score
+  ) %>%
+  head(15)
+
+# Count matched and unmatched MEblack genes
+MEblack_diamond_matches %>%
+  dplyr::summarise(
+    total_MEblack_genes = dplyr::n(),
+    matched_to_protein =
+      sum(!is.na(protein_accession)),
+    unmatched =
+      sum(is.na(protein_accession))
+  )
+```
+
+```{r}
+protein_gene_path <- paste0(
+  "/work/clh162/Data+/Sophie/",
+  "2025-2026-team-code-sac165/",
+  "Data+_team/Sophie/protein_genesymbol.tsv"
+)
+
+file.exists(protein_gene_path)
+
+protein_and_gene <- readr::read_tsv(
+  protein_gene_path,
+  col_names = c(
+    "protein_id",
+    "gene_symbol"
+  ),
+  show_col_types = FALSE
+)
+
+class(protein_and_gene)
+dim(protein_and_gene)
+head(protein_and_gene, 10)
+str(protein_and_gene)
+```
+
+```{r}
+protein_gene_coverage <- tibble::tibble(
+  total_rows = nrow(protein_and_gene),
+
+  unique_proteins =
+    dplyr::n_distinct(protein_and_gene$protein_id),
+
+  unique_gene_symbols =
+    dplyr::n_distinct(protein_and_gene$gene_symbol),
+
+  diamond_proteins_matched = sum(
+    unique(diamond_bridge$protein_accession) %in%
+      protein_and_gene$protein_id,
+    na.rm = TRUE
+  ),
+
+  gene_symbols_in_GO_table = sum(
+    unique(protein_and_gene$gene_symbol) %in%
+      annotation_gene_ids,
+    na.rm = TRUE
+  )
+)
+
+protein_gene_coverage
+```
+
+```{r}
+MEblack_protein_gene_preview <- MEblack_diamond_matches %>%
+  dplyr::left_join(
+    protein_and_gene,
+    by = c(
+      "protein_accession" = "protein_id"
+    )
+  ) %>%
+  dplyr::select(
+    gene_id,
+    protein_accession,
+    gene_symbol,
+    percent_identity,
+    e_value
+  )
+
+head(MEblack_protein_gene_preview, 15)
+```
+
+```{r}
+# Build the WGCNA gene → protein → LOC gene annotation bridge
+wgcna_gene_annotation <- module_gene_table_final %>%
+  dplyr::left_join(
+    diamond_bridge %>%
+      dplyr::select(
+        gene_id,
+        protein_accession,
+        percent_identity,
+        alignment_length,
+        e_value,
+        bit_score
+      ),
+    by = "gene_id"
+  ) %>%
+  dplyr::left_join(
+    protein_and_gene %>%
+      dplyr::distinct(
+        protein_id,
+        .keep_all = TRUE
+      ),
+    by = c(
+      "protein_accession" = "protein_id"
+    )
+  )
+
+# Convert LOC-based GO mappings back to the evm.TU WGCNA IDs
+wgcna_gene2cat <- wgcna_gene_annotation %>%
+  dplyr::filter(
+    !is.na(gene_symbol)
+  ) %>%
+  dplyr::select(
+    gene_id,
+    gene_symbol
+  ) %>%
+  dplyr::distinct() %>%
+  dplyr::inner_join(
+    gene2cat,
+    by = c(
+      "gene_symbol" = "ensembl_gene_id"
+    )
+  ) %>%
+  dplyr::transmute(
+    gene_id,
+    go_id
+  ) %>%
+  dplyr::filter(
+    !is.na(go_id),
+    go_id != ""
+  ) %>%
+  dplyr::distinct()
+
+# Preview the final mapping
+head(wgcna_gene2cat, 15)
+```
+
+```{r}
+# Genes with at least one GO annotation
+wgcna_genes_with_GO <- unique(
+  wgcna_gene2cat$gene_id
+)
+
+MEblack_gene_ids <- MEblack_genes$gene_id
+
+GO_coverage_summary <- tibble::tibble(
+  gene_set = c(
+    "All WGCNA genes",
+    "MEblack genes"
+  ),
+
+  total_genes = c(
+    nrow(module_gene_table_final),
+    length(MEblack_gene_ids)
+  ),
+
+  protein_matches = c(
+    sum(
+      !is.na(
+        wgcna_gene_annotation$protein_accession
+      )
+    ),
+    sum(
+      !is.na(
+        wgcna_gene_annotation$protein_accession[
+          wgcna_gene_annotation$module == "black"
+        ]
+      )
+    )
+  ),
+
+  LOC_matches = c(
+    sum(
+      !is.na(
+        wgcna_gene_annotation$gene_symbol
+      )
+    ),
+    sum(
+      !is.na(
+        wgcna_gene_annotation$gene_symbol[
+          wgcna_gene_annotation$module == "black"
+        ]
+      )
+    )
+  ),
+
+  genes_with_GO = c(
+    sum(
+      module_gene_table_final$gene_id %in%
+        wgcna_genes_with_GO
+    ),
+    sum(
+      MEblack_gene_ids %in%
+        wgcna_genes_with_GO
+    )
+  )
+) %>%
+  dplyr::mutate(
+    GO_coverage_percent =
+      100 * genes_with_GO / total_genes
+  )
+
+GO_coverage_summary
+
+# Additional mapping totals
+tibble::tibble(
+  total_gene_GO_pairs = nrow(wgcna_gene2cat),
+  unique_annotated_WGCNA_genes =
+    dplyr::n_distinct(wgcna_gene2cat$gene_id),
+  unique_GO_terms =
+    dplyr::n_distinct(wgcna_gene2cat$go_id)
+)
+```
+
+```{r}
+MEblack_annotation_status <- wgcna_gene_annotation %>%
+  dplyr::filter(
+    module == "black"
+  ) %>%
+  dplyr::mutate(
+    has_DIAMOND_match =
+      !is.na(protein_accession),
+
+    has_LOC_match =
+      !is.na(gene_symbol),
+
+    has_GO_annotation =
+      gene_id %in% wgcna_genes_with_GO
+  ) %>%
+  dplyr::select(
+    gene_id,
+    protein_accession,
+    gene_symbol,
+    percent_identity,
+    e_value,
+    has_DIAMOND_match,
+    has_LOC_match,
+    has_GO_annotation
+  )
+
+MEblack_annotation_status %>%
+  dplyr::filter(
+    !has_GO_annotation
+  )
+```
+
+```{r}
+wgcna_gene2cat <- wgcna_gene_annotation %>%
+  dplyr::filter(!is.na(gene_symbol)) %>%
+  dplyr::select(
+    gene_id,
+    gene_symbol
+  ) %>%
+  dplyr::distinct() %>%
+  dplyr::inner_join(
+    gene2cat %>%
+      dplyr::distinct(
+        ensembl_gene_id,
+        go_id
+      ),
+    by = c(
+      "gene_symbol" = "ensembl_gene_id"
+    ),
+    relationship = "many-to-many"
+  ) %>%
+  dplyr::transmute(
+    gene_id,
+    go_id
+  ) %>%
+  dplyr::filter(
+    !is.na(go_id),
+    go_id != ""
+  ) %>%
+  dplyr::distinct()
+
+# Confirm that every gene–GO combination is unique
+wgcna_gene2cat %>%
+  dplyr::count(
+    gene_id,
+    go_id
+  ) %>%
+  dplyr::filter(n > 1)
+```
+
+```{r}
+# Extract one featureCounts length per gene
+wgcna_gene_lengths <- sophie_raw %>%
+  dplyr::transmute(
+    gene_id = as.character(Geneid),
+    gene_length = as.numeric(Length)
+  ) %>%
+  dplyr::group_by(gene_id) %>%
+  dplyr::summarise(
+    gene_length = dplyr::first(gene_length),
+    .groups = "drop"
+  )
+
+# Build the complete 838-gene GOseq input table
+MEblack_goseq_input <- module_gene_table_final %>%
+  dplyr::transmute(
+    gene_id,
+    module,
+    selected_MEblack = as.integer(module == "black")
+  ) %>%
+  dplyr::left_join(
+    wgcna_gene_lengths,
+    by = "gene_id"
+  ) %>%
+  dplyr::arrange(gene_id)
+
+# Named binary selection vector
+MEblack_gene_vector <- MEblack_goseq_input$selected_MEblack
+names(MEblack_gene_vector) <- MEblack_goseq_input$gene_id
+
+# Named gene-length vector
+MEblack_length_vector <- MEblack_goseq_input$gene_length
+names(MEblack_length_vector) <- MEblack_goseq_input$gene_id
+
+# Validation checks
+dim(MEblack_goseq_input)
+
+table(MEblack_gene_vector)
+
+sum(is.na(MEblack_length_vector))
+sum(MEblack_length_vector <= 0, na.rm = TRUE)
+
+identical(
+  names(MEblack_gene_vector),
+  names(MEblack_length_vector)
+)
+
+summary(MEblack_length_vector)
+```
+
+```{r}
+# Estimate the probability weighting function for gene-length bias
+MEblack_pwf <- goseq::nullp(
+  DEgenes = MEblack_gene_vector,
+  bias.data = MEblack_length_vector,
+  plot.fit = TRUE
+)
+
+# Inspect the resulting weighting table
+dim(MEblack_pwf)
+names(MEblack_pwf)
+head(MEblack_pwf, 10)
+```
+
+```{r}
+# Confirm that the selected-gene indicators remained correct
+table(MEblack_pwf$DEgenes)
+
+# Summarize the estimated selection probabilities
+summary(MEblack_pwf$pwf)
+
+# Confirm that the weighting function contains no missing values
+sum(is.na(MEblack_pwf$pwf))
+```
+
+Step 4: Run GoEnrich
+
+```{r}
+# Confirm the two required inputs exist
+exists("MEblack_pwf")
+exists("wgcna_gene2cat")
+
+dim(MEblack_pwf)
+dim(wgcna_gene2cat)
+
+# Use a plain two-column data.frame for GOseq
+MEblack_gene2cat_input <- wgcna_gene2cat %>%
+  dplyr::select(
+    gene_id,
+    go_id
+  ) %>%
+  dplyr::distinct() %>%
+  as.data.frame()
+
+# Run MEblack GO enrichment
+MEblack_goseq_results <- goseq::goseq(
+  pwf = MEblack_pwf,
+  gene2cat = MEblack_gene2cat_input,
+  method = "Wallenius",
+  use_genes_without_cat = TRUE
+)
+
+# Confirm that the result was created
+exists("MEblack_goseq_results")
+dim(MEblack_goseq_results)
+head(MEblack_goseq_results, 10)
+```
+
+```{r}
+# Run GO enrichment for the MEblack module
+MEblack_goseq_results <- goseq::goseq(
+  pwf = MEblack_pwf,
+  gene2cat = wgcna_gene2cat,
+  method = "Wallenius",
+  use_genes_without_cat = TRUE
+)
+
+# Add BH false-discovery-rate correction
+MEblack_goseq_results <- MEblack_goseq_results %>%
+  dplyr::mutate(
+    padj = p.adjust(
+      over_represented_pvalue,
+      method = "BH"
+    )
+  ) %>%
+  dplyr::arrange(
+    over_represented_pvalue
+  )
+
+# Inspect the most enriched GO categories
+head(MEblack_goseq_results, 20)
+```
+
+```{r}
+tibble::tibble(
+  total_GO_terms_tested =
+    nrow(MEblack_goseq_results),
+
+  nominally_enriched_p_less_0_05 =
+    sum(
+      MEblack_goseq_results$over_represented_pvalue < 0.05,
+      na.rm = TRUE
+    ),
+
+  FDR_significant_padj_less_0_05 =
+    sum(
+      MEblack_goseq_results$padj < 0.05,
+      na.rm = TRUE
+    ),
+
+  minimum_raw_p =
+    min(
+      MEblack_goseq_results$over_represented_pvalue,
+      na.rm = TRUE
+    ),
+
+  minimum_adjusted_p =
+    min(
+      MEblack_goseq_results$padj,
+      na.rm = TRUE
+    )
+)
+```
+
+Several RNA-related GO categories showed nominal enrichment in the MEblack module, but none remained significant after correction for testing 578 GO terms.
+
+We should **not** call these definitively enriched pathways. They are exploratory biological signals that may help us understand the module.
+
+Because MEblack increases as salinity decreases, one exploratory biological hypothesis is that **lower-salinity events are associated with coordinated changes in genes involved in RNA regulation or gene-silencing processes**.
+
+```{r}
+# Keep the nominally enriched MEblack GO terms
+MEblack_top_terms <- MEblack_goseq_results %>%
+  dplyr::filter(
+    over_represented_pvalue < 0.05
+  ) %>%
+  dplyr::select(
+    category,
+    term,
+    ontology,
+    over_represented_pvalue,
+    padj,
+    numDEInCat,
+    numInCat
+  ) %>%
+  dplyr::arrange(
+    over_represented_pvalue
+  )
+
+MEblack_top_terms
+```
+
+```{r}
+# Identify the MEblack genes contributing to each top GO term
+MEblack_top_term_genes <- wgcna_gene2cat %>%
+  dplyr::filter(
+    gene_id %in% MEblack_genes$gene_id
+  ) %>%
+  dplyr::inner_join(
+    MEblack_top_terms,
+    by = c(
+      "go_id" = "category"
+    ),
+    relationship = "many-to-many"
+  ) %>%
+  dplyr::left_join(
+    wgcna_gene_annotation %>%
+      dplyr::select(
+        gene_id,
+        protein_accession,
+        gene_symbol,
+        percent_identity,
+        e_value,
+        bit_score
+      ) %>%
+      dplyr::distinct(
+        gene_id,
+        .keep_all = TRUE
+      ),
+    by = "gene_id"
+  ) %>%
+  dplyr::distinct(
+    go_id,
+    gene_id,
+    .keep_all = TRUE
+  ) %>%
+  dplyr::arrange(
+    over_represented_pvalue,
+    term,
+    gene_id
+  )
+
+MEblack_top_term_genes %>%
+  dplyr::select(
+    go_id,
+    term,
+    ontology,
+    over_represented_pvalue,
+    padj,
+    gene_id,
+    protein_accession,
+    gene_symbol,
+    percent_identity,
+    e_value
+  )
+```
+
+```{r}
+# Summarize the supporting genes for each GO term
+MEblack_top_term_gene_summary <- MEblack_top_term_genes %>%
+  dplyr::group_by(
+    go_id,
+    term,
+    ontology,
+    over_represented_pvalue,
+    padj,
+    numDEInCat,
+    numInCat
+  ) %>%
+  dplyr::summarise(
+    observed_MEblack_genes =
+      dplyr::n_distinct(gene_id),
+
+    supporting_gene_ids =
+      paste(
+        sort(unique(gene_id)),
+        collapse = ", "
+      ),
+
+    matched_LOC_ids =
+      paste(
+        sort(unique(stats::na.omit(gene_symbol))),
+        collapse = ", "
+      ),
+
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(
+    over_represented_pvalue
+  )
+
+MEblack_top_term_gene_summary
+```
+
+```{r}
+# Genes contributing to multiple nominally enriched GO terms
+MEblack_recurrent_GO_genes <- MEblack_top_term_genes %>%
+  dplyr::group_by(
+    gene_id,
+    protein_accession,
+    gene_symbol
+  ) %>%
+  dplyr::summarise(
+    number_of_top_GO_terms =
+      dplyr::n_distinct(go_id),
+
+    GO_terms =
+      paste(
+        sort(unique(term)),
+        collapse = " | "
+      ),
+
+    .groups = "drop"
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(number_of_top_GO_terms),
+    gene_id
+  )
+
+MEblack_recurrent_GO_genes
+```
+
+This tells us something really useful: the nine nominal GO terms are **not nine independent biological signals**. Most of the RNA-related terms are being driven by the **same two MEblack genes**.
+
+**INDIVIDUAL GENE REGRESSION**
+
+Step 1: Inspect individual gene expression data
+
+```{r}
+# Primary individual-gene candidate
+candidate_gene <- "evm.TU.Chr09.2202"
+
+# Inspect the normalized expression matrix used for WGCNA
+class(datExpr_modules_sophie)
+dim(datExpr_modules_sophie)
+
+# Confirm whether genes are stored in columns or rows
+candidate_gene %in% colnames(datExpr_modules_sophie)
+candidate_gene %in% rownames(datExpr_modules_sophie)
+
+# Preview sample and gene identifiers
+head(rownames(datExpr_modules_sophie), 10)
+head(colnames(datExpr_modules_sophie), 10)
+
+# Preview the candidate gene's normalized expression values
+if (candidate_gene %in% colnames(datExpr_modules_sophie)) {
+  candidate_gene_expression <- as.numeric(
+    datExpr_modules_sophie[, candidate_gene]
+  )
+
+  names(candidate_gene_expression) <-
+    rownames(datExpr_modules_sophie)
+
+  candidate_gene_expression
+  summary(candidate_gene_expression)
+}
+```
+
+```{r}
+# Inspect the sample-level table that should connect samples to events
+class(sample_level_eigengenes_sophie)
+dim(sample_level_eigengenes_sophie)
+names(sample_level_eigengenes_sophie)
+
+sample_level_eigengenes_sophie %>%
+  dplyr::select(
+    dplyr::any_of(
+      c(
+        "sample",
+        "sample_id",
+        "Sample",
+        "event_id",
+        "location",
+        "month",
+        "OysterID"
+      )
+    )
+  ) %>%
+  head(18)
+
+```
+
+Step 2: Locate the candidate gene's expression values
+
+```{r}
+candidate_gene <- "evm.TU.Chr09.2202"
+
+# Search matrix/data-frame objects for the candidate gene
+candidate_gene_locations <- purrr::map_dfr(
+  ls(),
+  function(object_name) {
+
+    object <- get(
+      object_name,
+      envir = .GlobalEnv
+    )
+
+    if (!(is.matrix(object) || is.data.frame(object))) {
+      return(NULL)
+    }
+
+    row_names <- rownames(object)
+    column_names <- colnames(object)
+
+    exact_row_match <-
+      !is.null(row_names) &&
+      candidate_gene %in% row_names
+
+    exact_column_match <-
+      !is.null(column_names) &&
+      candidate_gene %in% column_names
+
+    gene_id_column_match <-
+      is.data.frame(object) &&
+      "gene_id" %in% names(object) &&
+      candidate_gene %in% as.character(object$gene_id)
+
+    partial_row_matches <- if (!is.null(row_names)) {
+      paste(
+        grep(
+          "Chr09\\.2202",
+          row_names,
+          value = TRUE
+        ),
+        collapse = ", "
+      )
+    } else {
+      ""
+    }
+
+    partial_column_matches <- if (!is.null(column_names)) {
+      paste(
+        grep(
+          "Chr09\\.2202",
+          column_names,
+          value = TRUE
+        ),
+        collapse = ", "
+      )
+    } else {
+      ""
+    }
+
+    tibble::tibble(
+      object = object_name,
+      class = paste(class(object), collapse = ", "),
+      rows = nrow(object),
+      columns = ncol(object),
+      exact_row_match,
+      exact_column_match,
+      gene_id_column_match,
+      partial_row_matches,
+      partial_column_matches
+    )
+  }
+) %>%
+  dplyr::filter(
+    exact_row_match |
+      exact_column_match |
+      gene_id_column_match |
+      partial_row_matches != "" |
+      partial_column_matches != ""
+  )
+
+candidate_gene_locations
+```
+
+```{r}
+missing_from_datExpr_sophie <- module_gene_table_final %>%
+  dplyr::filter(
+    !gene_id %in% colnames(datExpr_modules_sophie)
+  )
+
+nrow(missing_from_datExpr_sophie)
+
+missing_from_datExpr_sophie %>%
+  dplyr::arrange(module, gene_id)
+```
+
+```{r}
+tibble::tibble(
+  gene_id = c(
+    "evm.TU.Chr08.2401",
+    "evm.TU.Chr09.2202"
+  ),
+  present_in_datExpr_modules_sophie = gene_id %in%
+    colnames(datExpr_modules_sophie)
+)
+```
